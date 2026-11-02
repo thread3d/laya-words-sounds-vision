@@ -199,7 +199,29 @@ def fit_one_temperature(pairs: Sequence, min_n: Optional[int] = None) -> float:
     return clamp_temperature(_fit_unclamped_temperature(pairs, min_n), TEMP_MIN, TEMP_MAX)
 
 
+MODALITIES = ("text", "image")
+MODALITY_TEXT = MODALITIES[0]
+MODALITY_IMAGE = MODALITIES[1]
+
+
+def _modality(value) -> str:
+    """Normalise a record's optional modality tag. Absent means text, which is every record a
+    text checkpoint can produce."""
+    if value is None:
+        return MODALITY_TEXT
+    if not isinstance(value, str) or value not in MODALITIES:
+        raise ValueError("modality must be one of %s, got %r" % (", ".join(MODALITIES), value))
+    return value
+
+
 def _iter_records(records: Iterable) -> List[Tuple[int, np.ndarray, np.ndarray, int]]:
+    """Validate the `(qtype, logits, target[, k])` records every fitter consumes.
+
+    The modality of a record is *not* a fifth tuple element: a parallel sequence
+    (`fit_temperature_map(..., modalities=...)`) keeps this format -- which
+    `records_from_labeled`, `fit_binning_map`, `fit_abstention_thresholds` and every caller's own
+    code already unpack -- exactly as it was.
+    """
     out = []
     for rec in records:
         if not isinstance(rec, (list, tuple)) or len(rec) not in (3, 4):
@@ -254,6 +276,27 @@ def _group_records(recs):
     return by_type, by_bucket
 
 
+def _check_modalities(modalities, n: int):
+    """Validate a parallel modality sequence: one known tag per record."""
+    mods = [_modality(m) for m in modalities]
+    if len(mods) != n:
+        raise ValueError("modalities has %d entries but there are %d records"
+                         % (len(mods), n))
+    return mods
+
+
+def _group_records_by_modality(recs, mods):
+    """Group `(z, t)` pairs by (modality, bucket), the axis a vision checkpoint calibrates on.
+
+    Kept separate from `_group_records` so the pooled map is fitted by exactly the code that fitted
+    it before: a text checkpoint produces no modality groups and pays nothing.
+    """
+    out = {m: {} for m in MODALITIES}
+    for (qt, z, t, k), m in zip(recs, mods):
+        out[m].setdefault(temp_bucket(qt, k), []).append((z, t))
+    return out
+
+
 def _ece_split(recs, seed):
     """Split records into fit and eval, stratified by `temp_bucket`.
 
@@ -261,6 +304,7 @@ def _ece_split(recs, seed):
     partition (`numpy.random.RandomState(seed)`): every record is in exactly one side.
     A bucket whose fit side would fall below `MIN_BUCKET_N` is not split; all of its
     records stay in `fit_recs` and its key is listed in `excluded_buckets`.
+
     """
     by_bucket = {}
     for i, rec in enumerate(recs):
@@ -290,6 +334,18 @@ def _ece_split(recs, seed):
     fit_recs = [recs[i] for i in fit_idx]
     eval_recs = [recs[i] for i in eval_idx]
     return fit_recs, eval_recs, excluded
+
+
+def _ece_split_indices(recs, seed):
+    """`_ece_split`'s partition as indices into `recs`, so a parallel sequence can follow it.
+
+    `_ece_split` returns the split records themselves and its three-value contract is relied on
+    outside this module; this keeps that intact while giving the modality axis the same partition
+    rather than a second, differently-seeded one.
+    """
+    fit_recs, eval_recs, excluded = _ece_split(recs, seed)
+    index = {id(rec): i for i, rec in enumerate(recs)}
+    return [index[id(r)] for r in fit_recs], [index[id(r)] for r in eval_recs], excluded
 
 
 def _clamp_entry(raw: float, applied: float) -> Optional[Dict[str, Any]]:
@@ -328,7 +384,28 @@ def _fit_groups(by_type, by_bucket):
     return temperature, temperature_by_options, clamped
 
 
-def fit_temperature_map(records: Iterable, compute_ece: bool = False, seed: int = 0) -> Dict[str, Any]:
+def _fit_bucket_map(by_bucket):
+    """Fit one temperature per bucket, clamped, skipping buckets under `MIN_BUCKET_N`.
+
+    Factored out of `_fit_groups` so the modality axis uses the identical floor and clamp: a
+    temperature fitted on one axis must not be governed by different rules than on the other.
+    """
+    out = {}
+    clamped: Dict[str, Dict[str, Any]] = {}
+    for key, pairs in by_bucket.items():
+        if len(pairs) < MIN_BUCKET_N:
+            continue
+        raw = _fit_unclamped_temperature(pairs)
+        out[key] = clamp_temperature(raw, TEMP_MIN, TEMP_MAX)
+        entry = _clamp_entry(raw, out[key])
+        if entry is not None:
+            clamped[key] = entry
+    return out, clamped
+
+
+def fit_temperature_map(records: Iterable, compute_ece: bool = False, seed: int = 0,
+                        modalities: Optional[Sequence[str]] = None,
+                        by_modality: Optional[bool] = None) -> Dict[str, Any]:
     """Fit type-level scalars and per-bucket temperatures.
 
     `MIN_BUCKET_N` is the per-bucket floor: smaller buckets are omitted from
@@ -366,15 +443,26 @@ def fit_temperature_map(records: Iterable, compute_ece: bool = False, seed: int 
                              or not 0 <= seed < 2 ** 32):
         raise ValueError("seed must be None or an integer in [0, 2**32-1], got %r" % (seed,))
     recs = _iter_records(records)
+    # The modality axis. `modalities` is a parallel sequence -- one "text"/"image" tag per record,
+    # which is the shape a vision checkpoint's record collection produces. Absent, nothing below
+    # changes: a text checkpoint fits the same map it always did, and writes no new key (C6).
+    mods = None
+    if modalities is not None:
+        mods = _check_modalities(modalities, len(recs))
+    want_modality = (by_modality if by_modality is not None else mods is not None)
+    if want_modality and mods is None:
+        raise ValueError("by_modality=True needs `modalities`, one tag per record")
     all_by_type, all_buckets = _group_records(recs)
     n_by_bucket = {key: len(pairs) for key, pairs in all_buckets.items()}
 
     if compute_ece:
         _fit_recs, eval_recs, excluded = _ece_split(recs, seed)
+        fit_idx, _eval_idx, _ = _ece_split_indices(recs, seed)
         by_type, by_bucket = _group_records(_fit_recs)
     else:
         eval_recs = None
         excluded = []
+        fit_idx = None
         by_type, by_bucket = all_by_type, all_buckets
 
     temperature, temperature_by_options, clamped = _fit_groups(by_type, by_bucket)
@@ -384,6 +472,30 @@ def fit_temperature_map(records: Iterable, compute_ece: bool = False, seed: int 
         "n_by_bucket": n_by_bucket,
         "temperature_clamped": clamped,
     }
+    if want_modality:
+        # The pooled map above stays exactly as it was, so a caller that ignores the modality axis
+        # still gets the fit it always got. This map is the refinement on top.
+        if fit_idx is None:
+            fit_recs_for_modality, fit_mods = recs, mods
+        else:
+            fit_recs_for_modality = [recs[i] for i in fit_idx]
+            fit_mods = [mods[i] for i in fit_idx]
+        groups = _group_records_by_modality(fit_recs_for_modality, fit_mods)
+        per_modality: Dict[str, Dict[str, float]] = {}
+        modality_clamped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        n_modality: Dict[str, Dict[str, int]] = {}
+        for modality, buckets in groups.items():
+            fitted, was_clamped = _fit_bucket_map(buckets)
+            if not fitted and not buckets:
+                continue
+            per_modality[modality] = fitted
+            n_modality[modality] = {key: len(pairs) for key, pairs in buckets.items()}
+            if was_clamped:
+                modality_clamped[modality] = was_clamped
+        out["temperature_by_modality"] = per_modality
+        out["n_by_modality_bucket"] = n_modality
+        if modality_clamped:
+            out["temperature_clamped_by_modality"] = modality_clamped
     if compute_ece:
         report = _ece_report(eval_recs, temperature, temperature_by_options)
         # `n` stays the size of the input. `n_eval` is the held-out count ECE used.
@@ -590,8 +702,13 @@ def apply_binning_map(confidence: float, bucket: str,
 
 
 @torch.no_grad()
-def records_from_labeled(agent, pairs: Sequence) -> List[Record]:
+def records_from_labeled(agent, pairs: Sequence, modalities: Optional[Sequence[str]] = None):
     """Collect CPU records from `(state, questions, targets)`.
+
+    Returns the `(qtype, logits, target, k)` records, or `(records, modality_per_record)` when
+    `modalities` is given -- a parallel tag per *pair*, which is what a vision checkpoint needs to
+    fit `temperature_by_modality`. A pair's tag applies to every record that pair produces, so the
+    two lists stay aligned however many questions each state carries.
 
     Logits are the raw rows `_decode_answers` scales, not the probabilities it returns.
     `_encode_state` builds one state's items, `_forward` runs them, and `_option_logits`
@@ -603,8 +720,14 @@ def records_from_labeled(agent, pairs: Sequence) -> List[Record]:
     # on the way through that import.
     from .agent import _option_logits
 
+    if modalities is not None:
+        modalities = [_modality(m) for m in modalities]
+        if len(modalities) != len(pairs):
+            raise ValueError("modalities has %d entries but there are %d pairs"
+                             % (len(modalities), len(pairs)))
     records: List[Record] = []
-    for state, questions, targets in pairs:
+    tags: List[str] = []
+    for pair_index, (state, questions, targets) in enumerate(pairs):
         ids = list(questions.keys())
         if not ids:
             continue
@@ -621,7 +744,9 @@ def records_from_labeled(agent, pairs: Sequence) -> List[Record]:
             k = len(items[j]["markers"])
             qt = int(items[j]["qtype"])
             records.append((qt, _vec(rows[j]), _vec(targets[qid])[:k], k))
-    return records
+            if modalities is not None:
+                tags.append(modalities[pair_index])
+    return (records, tags) if modalities is not None else records
 
 
 def _config_identity(cfg):
@@ -638,6 +763,7 @@ def calibration_payload(
     subfolder=None,
     config=None,
     binning_map=None,
+    temperature_by_modality=None,
 ) -> Dict[str, Any]:
     """JSON body written by `Agent.save_calibration` (no weights).
 
@@ -666,6 +792,13 @@ def calibration_payload(
     }
     if binning_map is not None:
         payload["binning_map"] = binning_map
+    # Omitted when absent, exactly like `binning_map`: a text checkpoint's calibration file keeps
+    # the bytes it had, and a vision checkpoint's says which map it carries (C6).
+    if temperature_by_modality is not None:
+        payload["temperature_by_modality"] = {
+            str(modality): {str(bucket): float(t) for bucket, t in dict(buckets).items()}
+            for modality, buckets in dict(temperature_by_modality).items()
+        }
     return payload
 
 
@@ -700,7 +833,8 @@ def _rejected_temperatures(entries):
     return rejected
 
 
-def _install_temperatures(obj, temperature, temperature_by_options, warn: bool = True) -> None:
+def _install_temperatures(obj, temperature, temperature_by_options, warn: bool = True,
+                          temperature_by_modality=None) -> None:
     """Store a map the way checkpoint load does: raw values, and the clamped ones inference reads.
 
     `warn=False` is the fitter path: those values were already passed through `clamp_temperature`,
@@ -710,14 +844,28 @@ def _install_temperatures(obj, temperature, temperature_by_options, warn: bool =
     applied_t = [clamp_temperature(t) for t in raw_t]
     raw_b = {str(k): v for k, v in dict(temperature_by_options).items()}
     applied_b = {k: clamp_temperature(v) for k, v in raw_b.items()}
+    mod_entries = []
     obj.temperature_raw = raw_t
     obj.temperature = applied_t
     obj.temperature_by_options_raw = raw_b
     obj.temperature_by_options = applied_b
+    # The modality map is installed only when one is supplied, and `None` always means "no map"
+    # rather than "clear it": a text payload must not erase a vision checkpoint's map, and a
+    # checkpoint with neither keeps the attribute absent from the maths entirely.
+    if temperature_by_modality is not None:
+        raw_m = {str(m): {str(b): v for b, v in dict(buckets).items()}
+                 for m, buckets in dict(temperature_by_modality).items()}
+        applied_m = {m: {b: clamp_temperature(v) for b, v in buckets.items()}
+                     for m, buckets in raw_m.items()}
+        obj.temperature_by_modality_raw = raw_m
+        obj.temperature_by_modality = applied_m
+        mod_entries = [("%s:%s" % (m, b), raw_m[m][b], applied_m[m][b])
+                       for m in raw_m for b in raw_m[m]]
     if not warn:
         return
     entries = [("temperature[%d]" % i, raw, applied_t[i]) for i, raw in enumerate(raw_t)]
     entries += [(key, raw_b[key], applied_b[key]) for key in raw_b]
+    entries += mod_entries
     rejected = _rejected_temperatures(entries)
     if rejected:
         warnings.warn(
@@ -826,7 +974,22 @@ def apply_calibration_payload(obj, payload: Dict[str, Any]) -> None:
                 if not 0.0 <= v <= 1.0:
                     raise ValueError(
                         "calibration JSON binning_map[%r] values must be in [0, 1], got %r" % (name, values))
+    by_modality = payload.get("temperature_by_modality")
+    if by_modality is not None:
+        if not isinstance(by_modality, dict):
+            raise ValueError(
+                "calibration JSON temperature_by_modality must be an object of "
+                "modality -> {bucket: float}, got %s" % type(by_modality).__name__)
+        for modality, buckets in by_modality.items():
+            if not isinstance(buckets, dict):
+                raise ValueError(
+                    "calibration JSON temperature_by_modality[%r] must be an object of "
+                    "bucket -> float, got %s" % (modality, type(buckets).__name__))
+            if str(modality) not in MODALITIES:
+                raise ValueError(
+                    "calibration JSON temperature_by_modality has key %r; known modalities are %s"
+                    % (modality, ", ".join(MODALITIES)))
     obj.binning_map = binning
     if version >= CALIBRATION_VERSION:
         _warn_if_identity_mismatch(obj, payload)
-    _install_temperatures(obj, temps, by_options)
+    _install_temperatures(obj, temps, by_options, temperature_by_modality=by_modality)

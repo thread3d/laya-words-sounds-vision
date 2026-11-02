@@ -52,6 +52,7 @@ from .common import (
     window_budget,
 )
 from .confidence import apply_confidence_gate, check_min_confidence
+from .calibrate import MODALITY_IMAGE, MODALITY_TEXT
 from .vision import (VisualCache, build_vision_encoder, collate_visual, load_pixels,
                      parse_vision, split_state, visual_plan)
 from .hooks import (
@@ -788,6 +789,11 @@ class Agent(HookRegistry):
         # Optional histogram-binning map installed by `load_calibration` or fit via
         # `fit_binning`; absent/None means answer_confidence is the temperature-scaled one.
         self.binning_map = None
+        # Temperatures per (modality, bucket), empty unless a vision checkpoint ships or fits one.
+        # An empty map means `_decode_answers` falls straight through to the pooled bucket, so a
+        # text checkpoint's confidences are bit-for-bit what they were (spec C6).
+        self.temperature_by_modality = {}
+        self.temperature_by_modality_raw = {}
 
         # Shared with `ONNXAgent` so both backends accept the same option and produce the same
         # confidences; see `common.resolve_lang_temperatures` for why the shape is checked before
@@ -1322,7 +1328,8 @@ class Agent(HookRegistry):
                     "or use fewer options"
                     % (qid, len(markers), n_opts, max_len, head_max_len))
             item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
-                    "state_stats": state_stats}
+                    "state_stats": state_stats,
+                    "modality": MODALITY_IMAGE if visual is not None else MODALITY_TEXT}
             if visual is not None:
                 head_ids, _, _ = build_head(self.tok, q, head_max_len,
                                             option_order=q.get("option_order"))
@@ -1520,6 +1527,12 @@ class Agent(HookRegistry):
             k = len(items[j]["markers"])
             qt = QTYPES[q["t"]]
             t_scale = self.temperature_by_options.get(temp_bucket(qt, k), self.temperature[qt])
+            # A vision checkpoint may carry a map fitted per input channel. Empty means text-only,
+            # which is the only case a checkpoint that has no vision support can be in.
+            by_modality = getattr(self, "temperature_by_modality", None)
+            if by_modality:
+                modality = items[j].get("modality", MODALITY_TEXT)
+                t_scale = by_modality.get(modality, {}).get(temp_bucket(qt, k), t_scale)
             if lang and lang.split("-")[0].lower() in self.lang_temperatures:
                 l_cfg = self.lang_temperatures[lang.split("-")[0].lower()]
                 t_scale = l_cfg["temperature_by_options"].get(temp_bucket(qt, k), l_cfg["temperature"][qt])
@@ -2184,17 +2197,23 @@ class Agent(HookRegistry):
 
     predict = system_one
 
-    def fit_temperatures(self, records, compute_ece: bool = False, seed: int = 0) -> Dict[str, Any]:
+    def fit_temperatures(self, records, compute_ece: bool = False, seed: int = 0,
+                         modalities=None) -> Dict[str, Any]:
         """Fit per-bucket temperatures from CPU records and store them on this agent.
 
         `records` are `(qtype, logits, target, k)`. Build them with
         `laya.calibrate.records_from_labeled` when you have labeled forwards; this method
         does not download weights or write `model.safetensors`. `seed` only affects the
         held-out ECE split when `compute_ece` is true. The checkpoint `cfg` is left as loaded.
+
+        `modalities` is an optional parallel sequence -- one "text"/"image" tag per record -- that
+        also fits `temperature_by_modality`. Omit it and the fit is the pooled one it always was.
         """
-        result = fit_temperature_map(records, compute_ece=compute_ece, seed=seed)
+        result = fit_temperature_map(records, compute_ece=compute_ece, seed=seed,
+                                     modalities=modalities)
         # Already clamped inside the fitter; don't report that as a bad calibration file.
-        _install_temperatures(self, result["temperature"], result["temperature_by_options"], warn=False)
+        _install_temperatures(self, result["temperature"], result["temperature_by_options"], warn=False,
+                              temperature_by_modality=result.get("temperature_by_modality"))
         return result
 
     def fit_binning(self, records, min_bucket_n: int = MIN_BINNING_BUCKET_N) -> Dict[str, Any]:
@@ -2211,7 +2230,11 @@ class Agent(HookRegistry):
 
     def save_calibration(self, path: str) -> None:
         """Write `temperature`, `temperature_by_options`, `binning_map` when the agent has one, and
-        the checkpoint they were fitted for. Does not write weights."""
+        the checkpoint they were fitted for. Does not write weights.
+
+        `temperature_by_modality` is written only when the agent carries a non-empty map, so a text
+        checkpoint's calibration file keeps exactly the keys it had (spec C6).
+        """
         payload = calibration_payload(
             self.temperature,
             self.temperature_by_options,
@@ -2219,6 +2242,7 @@ class Agent(HookRegistry):
             subfolder=getattr(self, "subfolder", None),
             config=getattr(self, "cfg", None),
             binning_map=getattr(self, "binning_map", None),
+            temperature_by_modality=getattr(self, "temperature_by_modality", None) or None,
         )
         destination = os.path.realpath(path)
         fd, temporary = tempfile.mkstemp(dir=os.path.dirname(destination), prefix=".calibration.", suffix=".tmp")

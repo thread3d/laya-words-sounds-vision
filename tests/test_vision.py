@@ -631,6 +631,153 @@ def test_split_state_keeps_the_other_keys_as_data():
     assert text == {"vendor": "acme"}, "non-image keys are still state"
 
 
+# -- calibration on the modality axis (spec 7.4 / 8) ---------------------------------------
+
+def _records(n=5200, seed=0):
+    """Enough records that each *channel* clears MIN_BUCKET_N (2000), not just the pooled bucket.
+
+    That is the real cost of the modality axis: an image bucket reaches the floor only after the
+    pooled bucket did, at roughly twice the records, because each channel sees half of them.
+    """
+    import numpy as np
+    rng = np.random.RandomState(seed)
+    recs, mods = [], []
+    for i in range(n):
+        k = 4
+        z = rng.randn(k) * 4.0
+        y = np.zeros(k)
+        y[i % k] = 1.0
+        recs.append((0, z, y))
+        mods.append("image" if i % 2 else "text")
+    return recs, mods
+
+
+def test_a_text_only_fit_gains_no_modality_key():
+    from laya.calibrate import fit_temperature_map
+    recs, _ = _records()
+    out = fit_temperature_map(recs)
+    assert "temperature_by_modality" not in out, "a text fit must not change shape (C6)"
+    assert "temperature_by_options" in out
+
+
+def test_the_modality_fit_refines_per_channel_and_leaves_the_pooled_map_alone():
+    from laya.calibrate import fit_temperature_map
+    recs, mods = _records()
+    pooled = fit_temperature_map(recs)
+    split = fit_temperature_map(recs, modalities=mods)
+    assert split["temperature"] == pooled["temperature"]
+    assert split["temperature_by_options"] == pooled["temperature_by_options"], \
+        "the pooled map is the refinement's parent, not its replacement"
+    by_mod = split["temperature_by_modality"]
+    assert set(by_mod) == {"text", "image"}, by_mod
+    assert "choice:3-5" in by_mod["image"], by_mod["image"]
+    assert split["n_by_modality_bucket"]["image"]["choice:3-5"] == 2600
+
+
+def test_a_small_channel_bucket_is_omitted_not_guessed():
+    """The MIN_BUCKET_N floor applies per (modality, bucket), exactly as per bucket."""
+    from laya.calibrate import fit_temperature_map, MIN_BUCKET_N
+    recs, mods = _records(n=MIN_BUCKET_N // 2)
+    out = fit_temperature_map(recs, modalities=mods)
+    assert out["temperature_by_modality"]["image"] == {}, \
+        "below the floor the channel must contribute nothing, not a noisy fit"
+
+
+def test_unknown_modality_tags_are_refused():
+    from laya.calibrate import fit_temperature_map
+    recs, mods = _records(n=40)
+    bad = list(mods)
+    bad[0] = "video"
+    try:
+        fit_temperature_map(recs, modalities=bad)
+    except ValueError as e:
+        assert "modality" in str(e), e
+    else:
+        raise AssertionError("an unknown modality must be refused")
+    try:
+        fit_temperature_map(recs, modalities=mods[:-1])
+    except ValueError as e:
+        assert "entries" in str(e), e
+    else:
+        raise AssertionError("a short modalities sequence must be refused")
+
+
+def test_modality_map_round_trips_through_the_calibration_file():
+    from laya.calibrate import apply_calibration_payload, calibration_payload, fit_temperature_map
+
+    class _Obj:
+        temperature = None
+        temperature_by_options = None
+        temperature_by_modality = None
+
+    recs, mods = _records()
+    fit = fit_temperature_map(recs, modalities=mods)
+    payload = calibration_payload(fit["temperature"], fit["temperature_by_options"],
+                                  temperature_by_modality=fit["temperature_by_modality"])
+    obj = _Obj()
+    apply_calibration_payload(obj, payload)
+    assert obj.temperature_by_modality == fit["temperature_by_modality"], obj.temperature_by_modality
+
+    text_payload = calibration_payload(fit["temperature"], fit["temperature_by_options"])
+    assert "temperature_by_modality" not in text_payload, "a text payload keeps its keys (C6)"
+    obj2 = _Obj()
+    apply_calibration_payload(obj2, text_payload)
+    assert obj2.temperature_by_modality is None, "an absent key must not clear or invent a map"
+
+
+def test_a_bad_modality_payload_is_refused_by_name():
+    from laya.calibrate import apply_calibration_payload
+
+    class _Obj:
+        pass
+
+    base = {"version": 2, "temperature": [1.0, 1.0, 1.0], "temperature_by_options": {}}
+    for bad, expect in (({"image": [1.0]}, "object of"), ({"video": {}}, "known modalities")):
+        try:
+            apply_calibration_payload(_Obj(), dict(base, temperature_by_modality=bad))
+        except ValueError as e:
+            assert expect in str(e), (expect, str(e))
+            continue
+        raise AssertionError("temperature_by_modality=%r should have been refused" % (bad,))
+
+
+def test_decode_uses_the_modality_temperature_for_image_rows_only():
+    agent = _vision_agent()
+    internal = {"q": agent._to_internal({"type": "choice", "instructions": "pick",
+                                         "criteria": ["a", "b"]})}
+    agent.temperature_by_options = {"choice:2": 2.0}
+    agent.temperature_by_modality = {"image": {"choice:2": 4.0}}
+    img = agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q"], internal)
+    txt = agent._encode_state("plain", ["q"], internal)
+    assert img[0]["modality"] == "image" and txt[0]["modality"] == "text"
+
+    import numpy as np
+    logits = np.array([[2.0, 0.0]], dtype=np.float32)
+    act = np.array([[0.0, 1.0]], dtype=np.float32)
+    img_ans = agent._decode_answers(logits, act, img, ["q"], internal, 0)
+    txt_ans = agent._decode_answers(logits, act, txt, ["q"], internal, 0)
+    # a larger temperature flattens the distribution: p(a) moves toward 0.5.
+    # softmax([2, 0] / 2) = 0.7311 and softmax([2, 0] / 4) = 0.6225.
+    assert img_ans["q"]["probabilities"]["a"] < txt_ans["q"]["probabilities"]["a"]
+    assert abs(txt_ans["q"]["probabilities"]["a"] - 0.7311) < 1e-3, txt_ans["q"]
+    assert abs(img_ans["q"]["probabilities"]["a"] - 0.6225) < 1e-3, img_ans["q"]
+
+
+def test_an_empty_modality_map_leaves_text_confidences_untouched():
+    """The C6 guarantee at the decode site: no map, byte-identical probabilities."""
+    agent = _vision_agent()
+    internal = {"q": agent._to_internal({"type": "choice", "instructions": "pick",
+                                         "criteria": ["a", "b"]})}
+    items = agent._encode_state("plain", ["q"], internal)
+    import numpy as np
+    logits = np.array([[2.0, 0.0]], dtype=np.float32)
+    act = np.array([[0.0, 1.0]], dtype=np.float32)
+    before = agent._decode_answers(logits, act, items, ["q"], internal, 0)
+    agent.temperature_by_modality = {}
+    after = agent._decode_answers(logits, act, items, ["q"], internal, 0)
+    assert before == after
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -670,4 +817,12 @@ if __name__ == "__main__":
     test_the_batch_forward_runs_and_answers()
     test_a_vision_checkpoint_refuses_the_fast_backend_message()
     test_split_state_keeps_the_other_keys_as_data()
+    test_a_text_only_fit_gains_no_modality_key()
+    test_the_modality_fit_refines_per_channel_and_leaves_the_pooled_map_alone()
+    test_a_small_channel_bucket_is_omitted_not_guessed()
+    test_unknown_modality_tags_are_refused()
+    test_modality_map_round_trips_through_the_calibration_file()
+    test_a_bad_modality_payload_is_refused_by_name()
+    test_decode_uses_the_modality_temperature_for_image_rows_only()
+    test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")
