@@ -510,7 +510,7 @@ def read_jsonl(path: str) -> List[Dict[str, Any]]:
 def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
                 option_order: Optional[List[int]] = None, parallel: bool = False,
                 vision=None, drop_visual: bool = False,
-                max_positions: int = 8192) -> Dict[str, Any]:
+                max_positions: int = 8192, only_option: Optional[int] = None) -> Dict[str, Any]:
     """The model input for an item, with options in `option_order` and the target to match.
 
     `build_sequence` puts option `option_order[s]` in slot `s`, so the slot-ordered target is
@@ -526,7 +526,8 @@ def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
         budget = max_len - vision.n_visual_tokens
     ids, markers, *layout = build_sequence(tok, None, item["q"], budget, head_max_len,
                                            option_order=option_order,
-                                           state_ids=item["state_ids"], return_layout=parallel)
+                                           state_ids=item["state_ids"], return_layout=parallel,
+                                           only_option=only_option)
     target = item["target"]
     if option_order is not None:
         target = [target[i] for i in option_order]
@@ -577,6 +578,35 @@ def soft_ce_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor)
     """Cross-entropy against a target distribution, over each row's own options only."""
     logp = torch.log_softmax(logits.masked_fill(~mask, _MASKED), -1)
     return -(target * logp * mask).sum(-1).mean()
+
+
+def grouped_soft_ce(scores: torch.Tensor, targets: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy across each question's own options, scored one row at a time.
+
+    The state-conditioned layout gives every option its own row, so a row holds one score and a
+    per-row softmax is constant (softmax over one number is 1, and the loss is 0 whatever the
+    model says). The normalisation has to happen across the *group* instead -- exactly what
+    `_decode_answers` does at inference, gathering a question's rows and softmaxing over them. If
+    training normalised differently from inference, the checkpoint would be fitted to a quantity
+    nobody ever reads.
+
+    `scores` is ``[N]``, `targets` ``[N]`` (each option's weight from the question's target
+    distribution) and `groups` ``[N]`` the question each row belongs to.
+    """
+    if scores.dim() != 1 or targets.dim() != 1 or groups.dim() != 1:
+        raise ValueError("grouped_soft_ce takes three 1-D tensors, got %s, %s and %s"
+                         % (tuple(scores.shape), tuple(targets.shape), tuple(groups.shape)))
+    if not (scores.numel() == targets.numel() == groups.numel()):
+        raise ValueError(
+            "grouped_soft_ce needs one score, one target weight and one group id per row; got "
+            "%d, %d and %d" % (scores.numel(), targets.numel(), groups.numel()))
+    total = scores.new_zeros(())
+    for group in torch.unique(groups):
+        rows = groups == group
+        z = scores[rows]
+        t = targets[rows]
+        total = total + -(torch.log_softmax(z, -1) * t).sum()
+    return total / max(1, int(torch.unique(groups).numel()))
 
 
 def rlcd_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, qtype: torch.Tensor,
@@ -812,7 +842,7 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
                 max_len: int, head_max_len: int,
                 on_epoch_end: Optional[Callable[[int, float], None]] = None,
                 parallel: bool = False, vision=None, embed_fn=None,
-                max_positions: int = 8192) -> List[float]:
+                max_positions: int = 8192, state_conditioned: bool = False) -> List[float]:
     """Train `model` in place on `items`; returns the mean loss of each epoch.
 
     `vision` is the checkpoint's parsed vision config and `embed_fn` its token-embedding lookup.
@@ -884,12 +914,25 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
             # the true answer, which is what teaches the model that the text alone is sometimes
             # all it gets -- and, on the image-required items, that it is not enough.
             chunk = []
-            for it in window:
+            groups = []          # one entry per row: which question of this window it scores
+            for position, it in enumerate(window):
                 dropped = bool(vision is not None and config.modality_dropout
                                and order_rng.random() < config.modality_dropout)
                 source = it if (dropped or projector is None) else _project_visual(it, projector)
-                chunk.append(encode_item(tok, source, max_len, head_max_len,
-                                         draw_option_order(it, order_rng, config.shuffle_options),
+                order = draw_option_order(it, order_rng, config.shuffle_options)
+                if state_conditioned:
+                    # One row per option. The row's own target is the weight that option carries
+                    # in the question's target distribution; the normalisation happens across the
+                    # group, in `grouped_soft_ce`.
+                    for slot in range(it["k"]):
+                        encoded = encode_item(tok, source, max_len, head_max_len, order, parallel,
+                                              vision=vision, max_positions=max_positions,
+                                              drop_visual=dropped, only_option=slot)
+                        encoded["target"] = [float(it["target"][order[slot] if order else slot])]
+                        chunk.append(encoded)
+                        groups.append(position)
+                    continue
+                chunk.append(encode_item(tok, source, max_len, head_max_len, order,
                                          parallel, vision=vision, max_positions=max_positions,
                                          drop_visual=dropped))
             batch = collate_training_batch(chunk, tok.pad_token_id,
@@ -904,7 +947,13 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
                               config.freeze_encoder and projector is None)
             mask = batch["marker_mask"].to(device)
             target = batch["target"].to(device)
-            if config.loss == "rlcd":
+            if state_conditioned:
+                # Every row carries exactly one marker; the question's distribution is the softmax
+                # across its rows, which is what `_decode_answers` will compute at inference.
+                scores = logits[:, 0]
+                group_ids = torch.tensor(groups, device=device)
+                loss = grouped_soft_ce(scores, target[:, 0], group_ids)
+            elif config.loss == "rlcd":
                 loss = rlcd_loss(logits, target, mask, batch["qtype"].to(device), sigma,
                                  config.rl_samples, config.w_sph, config.w_rps)
             else:
@@ -1219,12 +1268,6 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     if config.option_layout is not None:
         cfg = dict(cfg, option_layout=config.option_layout)
     parallel = uses_parallel_layout(cfg)
-    if uses_state_conditioned_layout(cfg):
-        raise ValueError(
-            "option_layout='state_conditioned' is an inference layout for now: training it would "
-            "mean one row per option per question, and `encode_item` still builds one row per "
-            "question -- so a run would save a checkpoint whose config says one layout and whose "
-            "weights learned the other")
     if parallel and parse_vision(cfg) is not None:
         raise ValueError("a vision checkpoint cannot train on the parallel option layout: its "
                          "masks are built from token ids and there are none once the visual block "
@@ -1367,7 +1410,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
 
     history = train_model(model, tok, train_items, config, dev, max_len, head_max_len,
                           on_epoch_end=checkpoint_latest, parallel=parallel,
-                          vision=vision, embed_fn=embed_fn, max_positions=max_positions)
+                          vision=vision, embed_fn=embed_fn, max_positions=max_positions,
+                          state_conditioned=uses_state_conditioned_layout(cfg))
 
     records = calibration_records(model, tok, calib_items, dev, max_len, head_max_len, parallel=parallel)
     collapse_msg = prior_collapse_message(records)

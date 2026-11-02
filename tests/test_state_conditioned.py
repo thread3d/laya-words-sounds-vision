@@ -150,6 +150,62 @@ def test_the_flip_gate_reports_zero_for_a_state_conditioned_agent():
     assert report["passed"] is True
 
 
+# -- training the state-conditioned layout -------------------------------------------------
+
+def test_the_grouped_objective_normalises_across_a_question_not_a_row():
+    """A per-row softmax over one score is always 1, so the loss must group first."""
+    from laya.train import grouped_soft_ce
+
+    one_question = torch.zeros(4, dtype=torch.long)
+    uniform = torch.zeros(4)
+    target = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    assert abs(float(grouped_soft_ce(uniform, target, one_question)) - 1.3863) < 1e-3
+    confident = torch.tensor([0.0, 5.0, 0.0, 0.0])
+    assert float(grouped_soft_ce(confident, target, one_question)) < 0.05
+
+    # two questions in one batch stay independent: uniform over two options each is ln 2
+    groups = torch.tensor([0, 0, 1, 1])
+    scores = torch.zeros(4)
+    targets = torch.tensor([1.0, 0.0, 0.0, 1.0])
+    assert abs(float(grouped_soft_ce(scores, targets, groups)) - 0.6931) < 1e-3
+
+
+def test_encoding_one_option_gives_a_row_with_one_marker():
+    """A *training* item (q + state_ids), which is what the loop encodes -- not an agent row."""
+    from laya.train import encode_item, items_from_rows
+
+    agent = _agent()
+    items, _ = items_from_rows(agent.tok,
+                               [{"state": "state text", "questions": {"q": QUESTION},
+                                 "expected": {"q": "beta"}}], 512, 192)
+    single = encode_item(agent.tok, items[0], 512, 192, only_option=0)
+    joint = encode_item(agent.tok, items[0], 512, 192)
+    assert len(single["markers"]) == 1, single["markers"]
+    assert len(joint["markers"]) == 3, joint["markers"]
+    assert len(single["ids"]) < len(joint["ids"]), "one option must cost fewer tokens than three"
+
+
+def test_a_state_conditioned_run_learns_and_moves_the_head():
+    """The layout trains, not just infers: one row per option, grouped loss, weights move."""
+    from laya.train import TrainConfig, items_from_rows, train_model
+
+    torch.manual_seed(0)
+    agent = _agent()
+    model, tok = agent.model, agent.tok
+    question = {"type": "choice", "instructions": "pick", "criteria": ["alpha", "beta", "gamma"]}
+    rows = [{"state": "state %d" % i, "questions": {"q": question},
+             "expected": {"q": ["alpha", "beta", "gamma"][i % 3]}} for i in range(12)]
+    items, _ = items_from_rows(tok, rows, 512, 192)
+    cfg = TrainConfig(epochs=2, micro_batch=4, grad_accum=1, head_lr=1e-2, log_every=0,
+                      loss="soft-ce")
+    before = model.scorer[3].weight.detach().clone()
+    history = train_model(model, tok, items, cfg, torch.device("cpu"), 512, 192,
+                          state_conditioned=True)
+    assert len(history) == 2 and all(v == v for v in history), history
+    assert not torch.equal(before, model.scorer[3].weight.detach()), \
+        "the head did not move through the grouped objective"
+
+
 if __name__ == "__main__":
     test_the_layout_flag_reads_the_config()
     test_each_option_gets_its_own_row_with_one_marker()
@@ -157,4 +213,7 @@ if __name__ == "__main__":
     test_the_joint_layout_still_puts_everything_in_one_row()
     test_a_state_conditioned_answer_is_invariant_to_option_order()
     test_the_flip_gate_reports_zero_for_a_state_conditioned_agent()
+    test_the_grouped_objective_normalises_across_a_question_not_a_row()
+    test_encoding_one_option_gives_a_row_with_one_marker()
+    test_a_state_conditioned_run_learns_and_moves_the_head()
     print("all state-conditioned tests passed")
