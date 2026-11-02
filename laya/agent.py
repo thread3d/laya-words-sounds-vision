@@ -56,7 +56,8 @@ from .common import (
 from .confidence import apply_confidence_gate, check_min_confidence
 from .calibrate import MODALITY_IMAGE, MODALITY_TEXT
 from .vision import (VisualCache, build_vision_encoder, collate_visual, load_pixels,
-                     load_vision_weights, parse_vision, split_state, visual_plan)
+                     load_vision_weights, local_tower_dir, parse_vision, split_state,
+                     visual_plan)
 from .hooks import (
     HookRegistry, PredictContext, _as_sequence, aggregate_usage, compose_hooks, dispatch,
     normalise_hooks, validate_timeout,
@@ -1251,7 +1252,10 @@ class Agent(HookRegistry):
             self.vision_encoder = build_vision_encoder(
                 self.vision,
                 hidden_size=self.model.encoder.config.hidden_size,
-                dtype=self.dtype if self.device.type != "cuda" else None)
+                dtype=self.dtype if self.device.type != "cuda" else None,
+                # A bundled tower wins over the Hub id: the bundled one cannot be re-tagged or
+                # disappear behind a network, and it is what makes an offline deployment work.
+                tower_dir=local_tower_dir(getattr(self, "model_dir", None)))
             # The projector's trained weights are the one part of a vision checkpoint that is not
             # in `model.safetensors`, so it is loaded explicitly -- and a checkpoint that declares
             # vision but ships none is refused here rather than answering from noise.

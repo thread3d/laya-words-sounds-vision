@@ -430,16 +430,39 @@ def _truncate_tower(tower, keep_layers: int):
     return tower
 
 
-def build_vision_encoder(config: VisionConfig, hidden_size: int, tower=None, dtype=None):
+TOWER_DIR = "vision_tower"
+
+
+def local_tower_dir(model_dir: Optional[str]) -> Optional[str]:
+    """The bundled tower inside a checkpoint directory, when one is there.
+
+    A vision checkpoint that names a Hub repository for its tower cannot serve a request offline,
+    which contradicts the reason Laya exists. `laya-train` bundles the tower beside the weights
+    (`save_vision_weights`'s neighbour), and this is the lookup that prefers it. A checkpoint with
+    no bundle falls back to the Hub id in its config, so existing checkpoints are unaffected.
+    """
+    if not model_dir:
+        return None
+    candidate = os.path.join(model_dir, TOWER_DIR)
+    return candidate if os.path.isdir(candidate) else None
+
+
+def build_vision_encoder(config: VisionConfig, hidden_size: int, tower=None, dtype=None,
+                         tower_dir: Optional[str] = None):
     """Assemble a :class:`VisionEncoder` for `config`.
 
     `tower` is injected when the caller already has one (tests, or a shared tower across
-    checkpoints); otherwise it is loaded from `config.tower`.
+    checkpoints); otherwise it is loaded from `tower_dir` if given, and from `config.tower` last.
+    A bundled directory is preferred over the Hub id because the bundled one is the checkpoint's
+    own artifact: it cannot be re-tagged, re-uploaded, or disappear behind a network.
     """
     torch = _torch()
     if tower is None:
-        tower = load_tower(config.tower, revision=config.tower_revision,
-                           keep_layers=config.keep_layers, dtype=dtype)
+        if tower_dir:
+            tower = load_tower(tower_dir, keep_layers=config.keep_layers, dtype=dtype)
+        else:
+            tower = load_tower(config.tower, revision=config.tower_revision,
+                               keep_layers=config.keep_layers, dtype=dtype)
     tower_dim = _tower_width(tower)
     projector = PooledProjector(tower_dim, hidden_size, config.n_visual_tokens,
                                 pooling=config.pooling, dtype=dtype)
@@ -1010,3 +1033,23 @@ def load_vision_weights(encoder: "VisionEncoder", path: str, dtype=None) -> "Vis
     encoder.projector.type_vector.data = type_vector.to(target_dtype)
     del torch
     return encoder
+
+
+def bundle_tower(encoder: "VisionEncoder", path: str) -> str:
+    """Copy the tower into `<path>/vision_tower/` so the checkpoint runs offline (§10.4).
+
+    The tower is a few hundred megabytes beside a checkpoint that is already hundreds; that is the
+    price of "local" meaning local. `save_pretrained` writes the config and weights the loader
+    reads back, so the bundle is a normal Hugging Face directory and can be inspected with the
+    usual tools.
+    """
+    tower = encoder.tower
+    save = getattr(tower, "save_pretrained", None)
+    if save is None:
+        raise TypeError(
+            "cannot bundle a %s tower: it has no save_pretrained, so the checkpoint would ship "
+            "without the weights it needs to run offline" % type(tower).__name__)
+    target = os.path.join(path, TOWER_DIR)
+    os.makedirs(target, exist_ok=True)
+    save(target)
+    return target

@@ -1050,6 +1050,48 @@ def test_the_same_bytes_decode_identically():
     assert torch.equal(load_pixels(data, 8), load_pixels(data, 8))
 
 
+# -- the tower travels with the checkpoint (spec §10.4) -------------------------------------
+
+def test_a_bundled_tower_is_preferred_over_the_hub_id():
+    """A checkpoint that needs the Hub at inference time is not local, whatever else it is."""
+    import tempfile
+    from transformers import SiglipVisionConfig, SiglipVisionModel
+
+    from laya.vision import TOWER_DIR, bundle_tower, build_vision_encoder, local_tower_dir
+
+    cfg = SiglipVisionConfig(hidden_size=8, intermediate_size=16, num_hidden_layers=1,
+                             num_attention_heads=2, image_size=32, patch_size=16)
+    v = parse_vision({"vision": {"n_visual_tokens": 4, "image_size": 32}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=SiglipVisionModel(cfg).eval())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert local_tower_dir(tmp) is None, "nothing bundled yet"
+        target = bundle_tower(enc, tmp)
+        assert os.path.basename(target) == TOWER_DIR
+        assert os.path.isdir(target) and os.listdir(target), "the bundle is empty"
+        assert local_tower_dir(tmp) == target
+
+        # Loaded back by directory alone: no Hub id, no revision, no network.
+        rebuilt = build_vision_encoder(v, hidden_size=16, tower_dir=local_tower_dir(tmp))
+        with torch.no_grad():
+            out = rebuilt.encode(torch.zeros(1, 3, 32, 32))
+        assert tuple(out.shape) == (1, 4, 16), out.shape
+
+
+def test_an_unbundleable_tower_fails_loudly():
+    """A checkpoint that would silently ship without its tower weights must not be written."""
+    from laya.vision import bundle_tower
+
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    try:
+        bundle_tower(enc, "/tmp")                       # _StubTower has no save_pretrained
+    except TypeError as exc:
+        assert "save_pretrained" in str(exc), exc
+    else:
+        raise AssertionError("a tower that cannot be saved must not be silently skipped")
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -1109,6 +1151,8 @@ if __name__ == "__main__":
     test_transparency_composites_onto_white_not_black()
     test_palette_and_cmyk_convert_through_srgb()
     test_the_same_bytes_decode_identically()
+    test_a_bundled_tower_is_preferred_over_the_hub_id()
+    test_an_unbundleable_tower_fails_loudly()
     test_decode_uses_the_modality_temperature_for_image_rows_only()
     test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")

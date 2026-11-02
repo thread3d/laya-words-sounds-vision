@@ -669,8 +669,10 @@ def save_checkpoint(model, tok, cfg: Dict[str, Any], path: str) -> None:
     # the weights. Skipping this line is silent: every load would rebuild a random projector.
     vision_encoder = getattr(model, "vision_encoder", None)
     if vision_encoder is not None:
-        from .vision import save_vision_weights
+        from .vision import bundle_tower, save_vision_weights
         save_vision_weights(vision_encoder, path)
+        # And the tower itself, so the checkpoint does not need the Hub at inference time.
+        bundle_tower(vision_encoder, path)
     model.encoder.config.save_pretrained(os.path.join(path, "encoder"))
     tok.save_pretrained(os.path.join(path, "tokenizer"))
     tmp = os.path.join(path, "rl_agent_config.json.tmp")
