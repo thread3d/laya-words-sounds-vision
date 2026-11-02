@@ -174,6 +174,17 @@ def build_parser() -> argparse.ArgumentParser:
              "without a block.",
     )
     parser.add_argument(
+        "--option-layout",
+        dest="option_layout",
+        choices=("sequential", "parallel", "state_conditioned"),
+        default=None,
+        help="Train the checkpoint for a different option layout. The layout is a property of the "
+             "weights -- a checkpoint reads the layout it was trained on -- so this is written "
+             "into the saved config. 'state_conditioned' scores each option in its own row, which "
+             "makes the answer independent of the order the caller lists the options in; it costs "
+             "one row per option instead of one row per question.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect dataset, build items, and print stats without loading model weights or training.",
@@ -233,6 +244,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         target_error=args.target_error,
         min_abstain_n=args.min_abstain_n,
         vision=vision,
+        option_layout=args.option_layout,
     )
 
     try:

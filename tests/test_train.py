@@ -467,6 +467,19 @@ class LossTests(unittest.TestCase):
         self.assertEqual(config.shuffle_options, ())
         self.assertEqual(config.micro_batch * config.grad_accum, 64)
 
+    def test_the_cli_can_set_the_option_layout(self):
+        """`TrainConfig.option_layout` existed but nothing on the command line could set it, so
+        `laya-train` could not produce a checkpoint for any layout but the sequential one."""
+        from laya.train_cli import build_parser
+
+        parser = build_parser()
+        base = ["--data", "d.jsonl", "--base", "m", "--out", "o"]
+        assert parser.parse_args(base).option_layout is None
+        for layout in ("sequential", "parallel", "state_conditioned"):
+            assert parser.parse_args(base + ["--option-layout", layout]).option_layout == layout
+        with self.assertRaises(SystemExit):
+            parser.parse_args(base + ["--option-layout", "sideways"])
+
     def test_config_rejects_unknown_values(self):
         for bad in (TrainConfig(loss="mse"), TrainConfig(shuffle_options=("choise",)),
                     TrainConfig(epochs=0), TrainConfig(calib_frac=1.0)):
