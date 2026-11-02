@@ -60,6 +60,7 @@ SCRIPT_SUITES = [
     "tests/test_train_vision.py",
     "tests/test_onnx_vision.py",
     "tests/test_state_conditioned.py",
+    "tests/test_router_vision.py",
     "tests/test_head_checkpointing.py",
     "tests/test_truncation.py",
     "tests/test_packaging.py",

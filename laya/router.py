@@ -45,6 +45,7 @@ from .hooks import (
     validate_timeout,
 )
 from .hooks import _SKIP_DEFAULTS
+from .vision import has_image
 from .lang import analyse
 
 # The hub repo bundles all three checkpoints; only the requested subfolder is downloaded.
@@ -716,6 +717,7 @@ class Router(HookRegistry):
         standalone_repos: bool = False,
         preload: bool = False,
         lang_guess: Optional[Any] = None,
+        vision_model: Optional[str] = "vision",
         hooks=None,
         on_predict_start=None,
         on_predict_end=None,
@@ -726,6 +728,11 @@ class Router(HookRegistry):
         sha256_digests: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
     ):
         self.hooks = normalise_hooks(hooks, on_predict_start, on_predict_end)
+        # The name a vision checkpoint is registered under. Routing a state that carries an image
+        # to it is opt-in in the sense that matters: the rule only fires once such a checkpoint
+        # exists in `self.models`, so a Router with none behaves exactly as before. `None` turns
+        # the rule off entirely, for a deployment that wants images to route by text alone.
+        self.vision_model = vision_model
         self.hooks_raise = bool(hooks_raise)
         self.hooks_concurrent = bool(hooks_concurrent)
         self.hooks_timeout = None if hooks_timeout is None else validate_timeout(hooks_timeout)
@@ -1254,8 +1261,18 @@ class Router(HookRegistry):
     ) -> RouteDecision:
         """Decide which checkpoint to use, without loading or running anything.
 
-        Precedence: explicit `model` > explicit `task` > detected workflow (opt-in) >
-        explicit `lang` > `lang_guess` > detected script/language > default.
+        Precedence: explicit `model` > explicit `task` > a state carrying an image (when a vision
+        checkpoint is registered) > detected workflow (opt-in) > explicit `lang` > `lang_guess` >
+        detected script/language > default.
+
+        The image rule is new and narrow: it fires only when `self.vision_model` names a checkpoint
+        in `self.models`, so a Router that has none routes exactly as it always did.
+
+        It sits above the language rules on purpose. `model=` and `task=` name a *checkpoint* and
+        still win; `lang=` and `lang_guess=` name a *language*, which does not override a rule
+        about which checkpoint can answer at all -- a text checkpoint cannot see pixels, whatever
+        language the text beside them is in. A caller who wants the German text model for an
+        image-bearing state says `model="multilingual"`.
 
         `lang_guess` is an opt-in hint -- a language code or a callable taking the state --
         checked after an explicit `lang` and before the built-in detection. It only answers
@@ -1275,6 +1292,21 @@ class Router(HookRegistry):
             key = self.resolve("typed-decisions" if str(task).lower().replace("-", "_") == "typed_decisions" else task)
             return RouteDecision(model=key, repo=_repo_str(self.models.get(key)), reason="explicit task=%r" % task,
                                  detection=None, workflow=None)
+
+        # A state carrying an image goes to the vision checkpoint (spec §10.4). It sits here, below
+        # an explicit `model=`/`task=` and above every language rule, because an image is stronger
+        # evidence about which checkpoint can answer than a script guess is: the text checkpoints
+        # cannot see pixels at all, whatever language the text is in.
+        #
+        # It fires only when a vision checkpoint is actually registered. Nothing changes for a
+        # deployment that has none -- which is every deployment today -- so text routing stays
+        # exactly what it was (C6), and a caller opts in by registering one.
+        if self.vision_model is not None and has_image(state):
+            key = canonical_name(self.vision_model)
+            if key in self.models:
+                return RouteDecision(model=key, repo=_repo_str(self.models[key]),
+                                     reason="state carries an image", detection=None,
+                                     workflow=None)
 
         workflow = match_typed_decisions_workflow(questions or {})
         if workflow and self.auto_task_detection:

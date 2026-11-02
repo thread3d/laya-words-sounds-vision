@@ -473,6 +473,15 @@ def tower_parameters(encoder: VisionEncoder):
 IMAGE_KEYS = ("image", "image_path", "image_base64")
 
 
+def has_image(state) -> bool:
+    """Whether a state carries an image reference -- the routing question, answered cheaply.
+
+    Deliberately narrower than `split_state`: it does not build anything, so the router can ask it
+    on every request without paying for a state it may not need to split.
+    """
+    return isinstance(state, dict) and any(key in state for key in IMAGE_KEYS + ("image_url",))
+
+
 def split_state(state):
     """Separate a state into its text half and its image spec.
 
