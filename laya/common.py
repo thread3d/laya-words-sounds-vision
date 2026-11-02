@@ -166,8 +166,13 @@ def build_sequence(
     return_stats: bool = False,
     return_truncation_stats: bool = False,
     return_layout: bool = False,
+    only_option: Optional[int] = None,
 ):
     """Format: [CLS] <type> instructions [SEP] [MASK] opt0 [MASK] opt1 ... [SEP] state [SEP].
+
+    `only_option` emits a single option's block instead of all of them -- one row of the
+    state-conditioned layout (`uses_state_conditioned_layout`), where an option is never in the
+    same sequence as its competitors.
 
     `state_ids` lets a caller tokenize the shared state once and reuse it across every question,
     instead of re-serializing and re-tokenizing the same document per question.
@@ -195,7 +200,8 @@ def build_sequence(
     `return_layout=True` adds one last return value, the parallel option layout from
     `parallel_layout`: `{"position_ids": [...], "option_ids": [...]}`, one entry per token.
     """
-    ids, markers, stats = build_head(tok, q, head_max_len, option_order=option_order)
+    ids, markers, stats = build_head(tok, q, head_max_len, option_order=option_order,
+                                     only_option=only_option)
     head_len = len(ids)
     room = max(0, max_len - len(ids) - 1)
     if state_ids is None:
@@ -223,7 +229,8 @@ def build_sequence(
     return (ids, markers, stats) + extra
 
 
-def build_head(tok, q: Dict, head_max_len: int = 192, option_order: Optional[List[int]] = None):
+def build_head(tok, q: Dict, head_max_len: int = 192, option_order: Optional[List[int]] = None,
+               only_option: Optional[int] = None):
     """The question half of a sequence: `[CLS] <type> instructions [SEP] [MASK] opt0 [MASK] opt1 ... [SEP]`.
 
     `build_sequence` appends the state to this and `state_room` measures what is left over for it,
@@ -231,6 +238,10 @@ def build_head(tok, q: Dict, head_max_len: int = 192, option_order: Optional[Lis
 
     Returns `(ids, markers, stats)`: the head token ids, the `[MASK]` position of each option in
     `option_order`, and the stats dict `build_sequence` returns for `return_stats`.
+
+    `only_option` emits just that one option's block -- the state-conditioned layout, where each
+    option is scored in a sequence that contains no other option. The head budget applies to the
+    single block, so a state-conditioned sequence gives its option more room than a joint one does.
     """
     mask_tok = tok.mask_token
     opts = render_options(q)
@@ -238,7 +249,7 @@ def build_head(tok, q: Dict, head_max_len: int = 192, option_order: Optional[Lis
     ins = str(q["ins"]).replace(mask_tok, " ")
     head_ids = _encode_question_text(tok, "%s question: %s" % (q["t"], ins), add_special_tokens=False)
     opt_ids = []
-    for i in order:
+    for i in order if only_option is None else [order[only_option]]:
         # Cap at the tokenizer, not after the fact: `[:48]` still makes the tokenizer process the
         # whole (possibly long) description. truncation=True, max_length=48 keeps the first 48
         # tokens, which is exactly what the previous slice produced.
@@ -306,7 +317,20 @@ def parallel_layout(markers: List[int], head_len: int, length: int) -> Dict[str,
     return {"position_ids": position_ids, "option_ids": option_ids}
 
 
-OPTION_LAYOUTS = ("sequential", "parallel")
+OPTION_LAYOUTS = ("sequential", "parallel", "state_conditioned")
+
+
+def uses_state_conditioned_layout(cfg: Dict) -> bool:
+    """Whether a checkpoint config scores each option in its own pass (`state_conditioned`).
+
+    The layout the specification recommends for vision (§4.1.1): every option is scored in a
+    sequence that contains *only* that option, so no option is ever conditioned on its competitors.
+    A model scoring options against each other can learn "compare A to B" instead of "compare A to
+    the image", and the symptom is measured -- 8-10% of answers flip when a caller reorders a list
+    that carries no information. Order-invariance is exactly the property this layout buys, at the
+    cost of one forward-pass row per option instead of one row per question.
+    """
+    return cfg.get("option_layout", "sequential") == "state_conditioned"
 
 
 def uses_parallel_layout(cfg: Dict) -> bool:

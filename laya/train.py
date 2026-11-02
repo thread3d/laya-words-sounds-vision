@@ -44,6 +44,7 @@ from .calibrate import MIN_TYPE_N, fit_abstention_thresholds, fit_temperature_ma
 from .vision import (VisualCache, build_vision_encoder, load_pixels, parse_vision,
                      split_state, visual_plan)
 from .common import (
+    uses_state_conditioned_layout,
     OPTION_LAYOUTS,
     QTYPE_NAMES,
     QTYPES,
@@ -1148,6 +1149,12 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     if config.option_layout is not None:
         cfg = dict(cfg, option_layout=config.option_layout)
     parallel = uses_parallel_layout(cfg)
+    if uses_state_conditioned_layout(cfg):
+        raise ValueError(
+            "option_layout='state_conditioned' is an inference layout for now: training it would "
+            "mean one row per option per question, and `encode_item` still builds one row per "
+            "question -- so a run would save a checkpoint whose config says one layout and whose "
+            "weights learned the other")
     if parallel and parse_vision(cfg) is not None:
         raise ValueError("a vision checkpoint cannot train on the parallel option layout: its "
                          "masks are built from token ids and there are none once the visual block "

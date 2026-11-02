@@ -47,6 +47,8 @@ from .common import (
     temperature_rejected,
     unpermute_probs,
     uses_parallel_layout,
+    uses_state_conditioned_layout,
+    render_options,
     window_batch_cap,
     state_room,
     window_budget,
@@ -674,6 +676,10 @@ class Agent(HookRegistry):
         with open(cfg_path) as f:
             self.cfg = json.load(f)
         self.parallel_options = uses_parallel_layout(self.cfg)
+        # `state_conditioned`: each option scored in a sequence holding no other option. Unlike
+        # the parallel layout this needs no custom masks -- it is ordinary rows with one marker
+        # each -- so every backend that can run a plain forward can run it.
+        self.state_conditioned = uses_state_conditioned_layout(self.cfg)
 
         weights_path = os.path.join(model_dir, "model.safetensors")
         if not os.path.exists(weights_path):
@@ -1312,6 +1318,37 @@ class Agent(HookRegistry):
         items = []
         for qid in ids:
             q = internal[qid]
+            if getattr(self, "state_conditioned", False):
+                # One row per option. The order of `ids` is preserved and the slot index rides on
+                # the item, so `_decode_answers` can put the distribution back together without
+                # relying on the rows being contiguous.
+                rows = []
+                for slot in range(len(render_options(q))):
+                    seq, markers, stats, state_stats = build_sequence(
+                        self.tok, state, q, text_len_budget, head_max_len,
+                        option_order=q.get("option_order"), truncate_left=truncate_left,
+                        state_ids=state_ids, return_stats=True, return_truncation_stats=True,
+                        only_option=slot)
+                    rows.append((slot, seq, markers, stats, state_stats))
+                for slot, seq, markers, stats, state_stats in rows:
+                    item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]],
+                            "options": stats, "state_stats": state_stats,
+                            "option_group": (qid, slot),
+                            "modality": MODALITY_IMAGE if visual is not None else MODALITY_TEXT}
+                    if visual is not None:
+                        head_ids, _, _ = build_head(self.tok, q, head_max_len,
+                                                    option_order=q.get("option_order"),
+                                                    only_option=slot)
+                        plan = visual_plan(
+                            vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
+                            max_len=max_len,
+                            max_position_embeddings=self.model.encoder.config.max_position_embeddings,
+                            option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                        item["visual"] = visual
+                        item["plan"] = plan
+                        item["markers"] = plan.marker_positions
+                    items.append(item)
+                continue
             seq, markers, stats, state_stats, *layout = build_sequence(
                 self.tok, state, q, text_len_budget, head_max_len,
                 option_order=q.get("option_order"),
@@ -1527,23 +1564,44 @@ class Agent(HookRegistry):
                         internal: Dict[str, Dict], offset: int, lang: Optional[str] = None) -> Dict[str, Any]:
         """Turn one state's logit rows (starting at `offset`) into typed answers."""
         answers = {}
+        # Which row(s) answer which question. The joint layouts put every option in one row; the
+        # state-conditioned layout gives each option its own, so a question's distribution is
+        # gathered from `k` rows rather than read off one.
+        state_conditioned = getattr(self, "state_conditioned", False)
+        if state_conditioned:
+            per_question = {}
+            for j, item in enumerate(items):
+                qid_j, slot = item["option_group"]
+                per_question.setdefault(qid_j, {})[slot] = j
+        else:
+            per_question = {qid: {0: j} for j, qid in enumerate(ids)}
         raw_rows = _option_logits(logits, items, offset)
         for j, qid in enumerate(ids):
-            r = offset + j
+            slots = per_question[qid]
+            row_index = slots[min(slots)]
+            r = offset + row_index
             q = internal[qid]
-            k = len(items[j]["markers"])
+            if state_conditioned:
+                ordered = [slots[s] for s in sorted(slots)]
+                k = len(ordered)
+                # One scalar per option, in slot order -- the same vector the joint layout reads
+                # out of a single row.
+                raw = np.array([float(logits[offset + idx, 0]) for idx in ordered], dtype=float)
+            else:
+                k = len(items[row_index]["markers"])
+                raw = raw_rows[j]
             qt = QTYPES[q["t"]]
             t_scale = self.temperature_by_options.get(temp_bucket(qt, k), self.temperature[qt])
             # A vision checkpoint may carry a map fitted per input channel. Empty means text-only,
             # which is the only case a checkpoint that has no vision support can be in.
             by_modality = getattr(self, "temperature_by_modality", None)
             if by_modality:
-                modality = items[j].get("modality", MODALITY_TEXT)
+                modality = items[row_index].get("modality", MODALITY_TEXT)
                 t_scale = by_modality.get(modality, {}).get(temp_bucket(qt, k), t_scale)
             if lang and lang.split("-")[0].lower() in self.lang_temperatures:
                 l_cfg = self.lang_temperatures[lang.split("-")[0].lower()]
                 t_scale = l_cfg["temperature_by_options"].get(temp_bucket(qt, k), l_cfg["temperature"][qt])
-            z = raw_rows[j] / t_scale
+            z = raw / t_scale
             p = np.exp(z - z.max())
             p /= p.sum()
 
