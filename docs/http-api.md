@@ -48,6 +48,9 @@ Everything is environment variables, so one image serves a laptop dev run and a 
 | `LAYA_MAX_CONCURRENT` | requests admitted past auth at once; excess gets `503` | `16` |
 | `LAYA_BODY_READ_TIMEOUT` | seconds a request may spend delivering its body before the server answers `408` and releases the admission slot it was holding. Unparseable, non-positive or infinite input falls back | `10` |
 | `LAYA_MAX_BATCH_TOKENS` | tokens one `/v1/systemone/batch` FORWARD PASS may collate (`states` x questions x row width); a larger batch is split into several passes, not refused | `131072` |
+| `LAYA_MAX_IMAGE_BYTES` | largest image, in bytes, a request state may carry; a bigger one is a `413` refused before it is decoded | `12582912` (12 MB) |
+| `LAYA_MAX_IMAGE_PIXELS` | largest image, in **pixels**, the server will decode. Checked against the PNG/JPEG/GIF/WebP header first, so a small file that declares an enormous picture is refused without a decoder ever running | `16777216` (4096x4096) |
+| `LAYA_ALLOW_IMAGE_URLS` | fetch `image_url` references. Off by default: a self-hosted engine that fetches any URL a request names is an SSRF primitive pointed at the operator's own network. Only `http` and `https` are fetched, even when on | `0` |
 | `LAYA_JEV_STRICT` | serve the strict Jev wire contract: no root `routing`, no per-answer `action` / `answer_confidence`, no `confidence` on noul answers, and `usage` reduced to `input_tokens` + `output_tokens`. For clients that validate the response against the Jev contract with no extra fields | `0` |
 | `LAYA_TOURNAMENT_GROUP` | answer a `choice` with more options than this by elimination, in groups of this size, on `/v1/systemone` and `/v1/systemone/batch`, and raise their option cap from 100 to 255. See [Large choices](#large-choices-laya_tournament_group). Unset, or outside 2 to 100, is off | `0` |
 

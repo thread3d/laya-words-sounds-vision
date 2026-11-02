@@ -778,6 +778,158 @@ def test_an_empty_modality_map_leaves_text_confidences_untouched():
     assert before == after
 
 
+# -- transport limits (the serving layer's half) ------------------------------------------
+
+def _png(w, h):
+    import struct
+    import zlib
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def test_header_dimensions_are_read_without_decoding():
+    from laya.vision import image_info
+    assert image_info(_png(8, 8)) == {"format": "png", "width": 8, "height": 8}
+    assert image_info(b"GIF89a" + (640).to_bytes(2, "little") + (480).to_bytes(2, "little")
+                      + b"\x00" * 8) == {"format": "gif", "width": 640, "height": 480}
+    assert image_info(b"not an image at all") is None
+
+
+def test_a_decompression_bomb_is_refused_before_any_decoder_runs():
+    """A 40-byte PNG can declare 30000x30000 pixels; decoding first is how a request costs GBs."""
+    import struct
+    from laya.vision import ImageRefused, check_image_bytes
+    bomb = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+            + struct.pack(">II", 30000, 30000) + b"\x08\x02\x00\x00\x00" + b"\x00" * 4)
+    assert len(bomb) < 64
+    try:
+        check_image_bytes(bomb)
+    except ImageRefused as exc:
+        assert exc.reason == "image_too_large", exc.reason
+        assert "900000000" in exc.detail, exc.detail
+    else:
+        raise AssertionError("a declared 900-megapixel image must be refused")
+
+
+def test_byte_and_pixel_limits_are_enforced():
+    from laya.vision import ImageRefused, check_image_bytes
+    good = _png(8, 8)
+    assert check_image_bytes(good)["width"] == 8
+    try:
+        check_image_bytes(good, max_bytes=len(good) - 1)
+    except ImageRefused as exc:
+        assert exc.reason == "image_too_large", exc.reason
+    else:
+        raise AssertionError("an oversize body must be refused")
+    try:
+        check_image_bytes(good, max_pixels=16)
+    except ImageRefused as exc:
+        assert exc.reason == "image_too_large", exc.reason
+    else:
+        raise AssertionError("a too-many-pixels image must be refused")
+
+
+def test_urls_are_off_unless_the_deployment_opts_in():
+    """A self-hosted engine that fetches any URL is an SSRF primitive aimed at its own network."""
+    from laya.vision import ImageRefused, read_image_bytes
+    try:
+        read_image_bytes({"url": "http://169.254.169.254/latest/meta-data/"})
+    except ImageRefused as exc:
+        assert exc.reason == "image_url_disabled", exc.reason
+        assert "LAYA_ALLOW_IMAGE_URLS" in exc.detail, exc.detail
+    else:
+        raise AssertionError("URL fetching must be opt-in")
+    try:
+        read_image_bytes({"url": "file:///etc/passwd"}, allow_url=True)
+    except ImageRefused as exc:
+        assert exc.reason == "image_url_scheme", exc.reason
+    else:
+        raise AssertionError("only http(s) may be fetched, even when opted in")
+
+
+def test_references_resolve_to_the_same_bytes():
+    import base64
+    from laya.vision import read_image_bytes
+    png = _png(8, 8)
+    assert read_image_bytes(png) == png
+    assert read_image_bytes({"bytes": png}) == png
+    assert read_image_bytes(base64.b64encode(png).decode()) == png
+    assert read_image_bytes({"base64": base64.b64encode(png).decode()}) == png
+
+
+def test_a_path_reference_is_read_with_the_cap():
+    import tempfile
+    from laya.vision import ImageRefused, read_image_bytes
+    png = _png(8, 8)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+        handle.write(png)
+        path = handle.name
+    try:
+        assert read_image_bytes({"path": path}) == png
+        try:
+            read_image_bytes({"path": path}, max_bytes=8)
+        except ImageRefused as exc:
+            assert exc.reason == "image_too_large", exc.reason
+        else:
+            raise AssertionError("a file over the byte cap must be refused by size, unread")
+    finally:
+        os.unlink(path)
+
+
+def test_mcp_refuses_inline_image_bytes_and_accepts_a_reference():
+    from laya.mcp.tools import ToolError, validate_state
+    assert validate_state({"message": "hi", "image_path": "a.png"})["image_path"] == "a.png"
+    for bad in ({"image_base64": "AAAA"}, {"image": {"base64": "AAAA"}}):
+        try:
+            validate_state(bad)
+        except ToolError as exc:
+            assert exc.code == "invalid_state", exc.code
+            assert "path" in exc.message or "URL" in exc.message, exc.message
+        else:
+            raise AssertionError("%r carries inline bytes and must be refused" % (bad,))
+
+
+def test_the_server_resolves_an_image_and_measures_only_the_text():
+    """The request boundary: references become bytes, and the char gate ignores the bytes."""
+    try:
+        from laya.serve import _resolve_image_state, _state_length
+    except ImportError:                                     # pragma: no cover - serve extra
+        print("SKIP: serve extra is not installed")
+        return
+    from fastapi import HTTPException
+    import base64
+
+    # A text state is returned as-is: nothing about a text deployment changes (C6).
+    assert _resolve_image_state({"text": "hi"}) == {"text": "hi"}
+    assert _resolve_image_state("plain") == "plain"
+
+    png = _png(8, 8)
+    out = _resolve_image_state({"text": "hi", "image_base64": base64.b64encode(png).decode()})
+    assert sorted(out) == ["image", "text"], out
+    assert out["image"]["bytes"] == png
+    # `MAX_STATE_CHARS` counts characters that become tokens; the image becomes a visual block,
+    # so counting its bytes would refuse an ordinary picture on a limit that does not apply.
+    assert _state_length(out) < _state_length({"text": "hi"}) + 100
+
+    for spec, status in (({"image_base64": "A" * (20 * 1024 * 1024)}, 413),
+                         ({"image_path": "/nonexistent/x.png"}, 400),
+                         ({"image_url": "http://example.com/x.png"}, 400),
+                         ({"image": "Z" * 100}, 400)):
+        try:
+            _resolve_image_state(dict(spec, text="t"))
+        except HTTPException as exc:
+            assert exc.status_code == status, (list(spec), exc.status_code, exc.detail)
+            continue
+        raise AssertionError("%r should have been refused" % (list(spec),))
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -823,6 +975,14 @@ if __name__ == "__main__":
     test_unknown_modality_tags_are_refused()
     test_modality_map_round_trips_through_the_calibration_file()
     test_a_bad_modality_payload_is_refused_by_name()
+    test_header_dimensions_are_read_without_decoding()
+    test_a_decompression_bomb_is_refused_before_any_decoder_runs()
+    test_byte_and_pixel_limits_are_enforced()
+    test_urls_are_off_unless_the_deployment_opts_in()
+    test_references_resolve_to_the_same_bytes()
+    test_a_path_reference_is_read_with_the_cap()
+    test_mcp_refuses_inline_image_bytes_and_accepts_a_reference()
+    test_the_server_resolves_an_image_and_measures_only_the_text()
     test_decode_uses_the_modality_temperature_for_image_rows_only()
     test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")

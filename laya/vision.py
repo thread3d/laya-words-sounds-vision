@@ -539,8 +539,15 @@ def load_pixels(spec, image_size: int = 224):
     if isinstance(spec, str) and spec.startswith(("http://", "https://")):
         raise ValueError("laya does not fetch images: resolve the URL in the caller (the HTTP "
                          "server owns its own timeouts and limits) and pass a path or bytes")
-    raw = base64.b64decode(spec) if isinstance(spec, bytes) or _looks_base64(spec) else None
-    src = io.BytesIO(raw) if raw is not None else spec
+    if isinstance(spec, bytes):
+        # Raw image bytes, exactly what a server hands over after its own transport and limits.
+        # They are *not* base64 text: decoding them as base64 was the earlier reading, and it
+        # turned every served image into mojibake that Pillow then refused.
+        src = io.BytesIO(spec)
+    elif _looks_base64(spec):
+        src = io.BytesIO(base64.b64decode(spec))
+    else:
+        src = spec
     with Image.open(src) as im:
         im = im.convert("RGB")
         im = im.resize((image_size, image_size))
@@ -665,3 +672,231 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
         "marker_mask": mmask,
         "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long),
     }
+
+
+# ------------------------------------------------------------------------------------------------
+# Transport limits (the serving layer's half)
+# ------------------------------------------------------------------------------------------------
+#
+# A server cannot hand raw pixels to a model without first answering two questions: how many bytes
+# arrived, and how big the picture claims to be. The second matters more than it looks -- a
+# 40-byte PNG can declare 30000x30000 pixels, and decoding it before checking is a decompression
+# bomb that costs gigabytes for a request that should have been refused in microseconds. Both
+# checks are done on the header, before any decoder runs, which is also why they work on a
+# deployment that has not installed the vision extra.
+
+MAX_IMAGE_BYTES = 12 * 1024 * 1024        # 12 MB, override with LAYA_MAX_IMAGE_BYTES
+MAX_IMAGE_PIXELS = 4096 * 4096            # ~16.8 MP, override with LAYA_MAX_IMAGE_PIXELS
+
+
+class ImageRefused(ValueError):
+    """A refused image, carrying the reason a caller should be told."""
+
+    def __init__(self, reason: str, detail: str):
+        super().__init__("%s: %s" % (reason, detail))
+        self.reason = reason
+        self.detail = detail
+
+
+def image_info(data) -> Optional[Dict[str, Any]]:
+    """Width, height and format read from the first bytes of an image, without decoding it.
+
+    Covers PNG, JPEG, GIF and WebP -- the formats a caller actually sends. Returns ``None`` for
+    anything else rather than guessing; the caller decides whether an unidentified header is a
+    refusal or merely unmeasured.
+    """
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 12:
+        return None
+    data = bytes(data)
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+        return {"format": "png", "width": width, "height": height}
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        width = int.from_bytes(data[6:8], "little")
+        height = int.from_bytes(data[8:10], "little")
+        return {"format": "gif", "width": width, "height": height}
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        chunk = data[12:16]
+        if chunk == b"VP8 " and len(data) >= 30:
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+            return {"format": "webp", "width": width, "height": height}
+        if chunk == b"VP8L" and len(data) >= 25:
+            bits = int.from_bytes(data[21:25], "little")
+            return {"format": "webp", "width": (bits & 0x3FFF) + 1,
+                    "height": ((bits >> 14) & 0x3FFF) + 1}
+        if chunk == b"VP8X" and len(data) >= 30:
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+            return {"format": "webp", "width": width, "height": height}
+        return {"format": "webp", "width": None, "height": None}
+    if data[:2] == b"\xff\xd8":
+        # JPEG carries its dimensions in a start-of-frame segment, which is not at a fixed offset:
+        # walk the marker chain until one shows up.
+        i = 2
+        n = len(data)
+        while i + 9 < n:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            segment = int.from_bytes(data[i + 2:i + 4], "big")
+            # SOF0..SOF15 minus the three non-frame markers in that range (DHT, JPG, DAC)
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                height = int.from_bytes(data[i + 5:i + 7], "big")
+                width = int.from_bytes(data[i + 7:i + 9], "big")
+                return {"format": "jpeg", "width": width, "height": height}
+            i += 2 + segment
+        return {"format": "jpeg", "width": None, "height": None}
+    return None
+
+
+def check_image_bytes(data, max_bytes: Optional[int] = None,
+                      max_pixels: Optional[int] = None) -> Dict[str, Any]:
+    """Refuse an image that is too large to decode, before any decoder sees it.
+
+    Returns what :func:`image_info` found, so a caller that wants the dimensions does not parse the
+    header twice. An unidentified format is refused only when a pixel limit is in force and the
+    header could not supply one -- "I could not measure it" is not the same as "it is small".
+    """
+    max_bytes = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
+    max_pixels = MAX_IMAGE_PIXELS if max_pixels is None else int(max_pixels)
+    if not isinstance(data, (bytes, bytearray)):
+        raise ImageRefused("image", "expected bytes, got %s" % type(data).__name__)
+    if not data:
+        raise ImageRefused("image", "empty body")
+    if len(data) > max_bytes:
+        raise ImageRefused("image_too_large",
+                           "%d bytes exceeds the %d-byte limit" % (len(data), max_bytes))
+    info = image_info(data)
+    if info is None:
+        raise ImageRefused("image_unsupported",
+                           "not a PNG, JPEG, GIF or WebP image")
+    width, height = info.get("width"), info.get("height")
+    if width is None or height is None:
+        raise ImageRefused("image_unmeasurable",
+                           "the %s header did not state its dimensions, so the %d-pixel limit "
+                           "cannot be checked" % (info.get("format"), max_pixels))
+    if width < 1 or height < 1:
+        raise ImageRefused("image_invalid",
+                           "the %s header states %dx%d" % (info.get("format"), width, height))
+    if width * height > max_pixels:
+        raise ImageRefused("image_too_large",
+                           "%dx%d = %d pixels exceeds the %d-pixel limit"
+                           % (width, height, width * height, max_pixels))
+    return info
+
+
+def read_image_bytes(spec, max_bytes: Optional[int] = None, max_pixels: Optional[int] = None,
+                     allow_url: bool = False, timeout: float = 5.0) -> bytes:
+    """Resolve an image reference into raw bytes, applying the transport limits.
+
+    Accepted forms: raw ``bytes`` (already read), a filesystem ``path``, a base64 string, or --
+    only when `allow_url` is set -- an ``http(s)`` URL.
+
+    **URLs are off by default and that is not an oversight.** A self-hosted decision engine that
+    fetches whatever URL a request names is a server-side request forgery primitive pointed at the
+    operator's own network: ``http://169.254.169.254/`` and ``http://localhost:9200/`` are one
+    request away. A deployment that wants it opts in and puts its own egress policy in front.
+    """
+    import base64
+    from urllib.parse import urlparse
+
+    if isinstance(spec, (bytes, bytearray)):
+        data = bytes(spec)
+    elif isinstance(spec, dict):
+        if "bytes" in spec:
+            data = spec["bytes"]
+        elif "path" in spec:
+            data = _read_path(spec["path"], max_bytes)
+        elif "url" in spec:
+            data = _read_url(spec["url"], max_bytes, allow_url, timeout, urlparse)
+        elif "base64" in spec:
+            data = _decode_base64(spec["base64"], max_bytes, base64)
+        else:
+            raise ImageRefused("image",
+                               "a mapping must carry one of bytes, path, url or base64; got %s"
+                               % ", ".join(sorted(spec)))
+    elif isinstance(spec, str):
+        if spec.startswith(("http://", "https://")):
+            data = _read_url(spec, max_bytes, allow_url, timeout, urlparse)
+        elif os.path.exists(spec):
+            data = _read_path(spec, max_bytes)
+        else:
+            data = _decode_base64(spec, max_bytes, base64)
+    else:
+        raise ImageRefused("image", "expected bytes, a path, a URL or base64; got %s"
+                           % type(spec).__name__)
+    check_image_bytes(data, max_bytes=max_bytes, max_pixels=max_pixels)
+    return data
+
+
+def _read_path(path, max_bytes) -> bytes:
+    if not isinstance(path, str):
+        raise ImageRefused("image", "path must be a string, got %s" % type(path).__name__)
+    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise ImageRefused("image_unreadable", "%s: %s" % (path, exc.strerror or exc)) from exc
+    if size > limit:
+        raise ImageRefused("image_too_large",
+                           "%s is %d bytes, over the %d-byte limit" % (path, size, limit))
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(limit + 1)
+    except OSError as exc:
+        raise ImageRefused("image_unreadable", "%s: %s" % (path, exc.strerror or exc)) from exc
+
+
+def _decode_base64(text, max_bytes, base64) -> bytes:
+    if not isinstance(text, str):
+        raise ImageRefused("image", "base64 must be a string, got %s" % type(text).__name__)
+    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
+    # A base64 string is 4/3 the size of what it decodes to, so the encoded length is already a
+    # lower bound on the work; refusing here avoids materialising a huge buffer to measure it.
+    if len(text) > (limit // 3 + 1) * 4:
+        raise ImageRefused("image_too_large",
+                           "the encoded image is longer than a %d-byte image can be" % limit)
+    try:
+        return base64.b64decode(text, validate=True)
+    except Exception as exc:                                     # noqa: BLE001 - any decode error
+        raise ImageRefused("image_invalid", "base64 did not decode: %s" % exc) from exc
+
+
+def _read_url(url, max_bytes, allow_url, timeout, urlparse) -> bytes:
+    if not allow_url:
+        raise ImageRefused(
+            "image_url_disabled",
+            "fetching an image over the network is off by default; set LAYA_ALLOW_IMAGE_URLS=1 "
+            "to enable it, or send the bytes")
+    if not isinstance(url, str):
+        raise ImageRefused("image", "url must be a string, got %s" % type(url).__name__)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ImageRefused("image_url_scheme",
+                           "only http and https are fetched, got %r" % (parsed.scheme,))
+    if not parsed.hostname:
+        raise ImageRefused("image_url_invalid", "no host in %r" % (url,))
+    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
+    import urllib.request
+    request = urllib.request.Request(url, headers={"User-Agent": "laya-image-fetch"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:   # noqa: S310 - opt-in
+            declared = response.headers.get("Content-Length")
+            if declared is not None and int(declared) > limit:
+                raise ImageRefused("image_too_large",
+                                   "the server declares %s bytes, over the %d-byte limit"
+                                   % (declared, limit))
+            data = response.read(limit + 1)
+    except ImageRefused:
+        raise
+    except Exception as exc:                                     # noqa: BLE001 - network errors
+        raise ImageRefused("image_unreachable", "%s: %s" % (url, exc)) from exc
+    if len(data) > limit:
+        raise ImageRefused("image_too_large", "%s returned more than %d bytes" % (url, limit))
+    return data

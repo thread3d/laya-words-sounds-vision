@@ -53,6 +53,17 @@ env var                    meaning                                        defaul
 ``LAYA_BODY_READ_TIMEOUT`` seconds a request may spend delivering its body   10
                            before the server answers 408 and releases its
                            admission slot (see below)
+``LAYA_MAX_IMAGE_BYTES``   largest image a request state may carry, in     12582912
+                           bytes; a bigger one is refused with 413 before
+                           it is decoded
+``LAYA_MAX_IMAGE_PIXELS``  largest image the server will decode, in        16777216
+                           pixels. Checked against the PNG/JPEG/GIF/WebP
+                           header first, so a small file declaring a huge
+                           picture is refused without a decoder running
+``LAYA_ALLOW_IMAGE_URLS``  fetch an ``image_url`` reference. Off by        0
+                           default: fetching any URL a request names is an
+                           SSRF primitive aimed at the operator's own
+                           network. Only http/https, even when on
 ``LAYA_JEV_STRICT``        if set, serve the strict Jev wire contract: no   0
                            root `routing`, no per-answer `action` /
                            `answer_confidence`, no `confidence` on noul
@@ -82,6 +93,8 @@ import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
+
+from . import vision as _vision
 
 # A failed inference is reported to the client as a fixed 500 so nothing about paths,
 # weights or memory state leaks, which leaves the server log as the only place the
@@ -1005,6 +1018,88 @@ def _state_length_lower_bound_over(state: Any, cap: int) -> int:
     return 0
 
 
+# Image transport. A request may carry an image in its state; the server owns the fetch, the byte
+# cap and the pixel cap, and hands the model raw bytes. The pixel cap is checked against the
+# *header* before any decoder runs, because a 40-byte PNG can declare 30000x30000 pixels and
+# decoding it first is how a single request costs gigabytes.
+IMAGE_REQUEST_KEYS = ("image", "image_path", "image_url", "image_base64")
+
+
+def _image_limit(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError("%s must be an integer, got %r" % (name, raw))
+    if value < 1:
+        raise ValueError("%s must be at least 1, got %d" % (name, value))
+    return value
+
+
+def _image_urls_allowed() -> bool:
+    return os.environ.get("LAYA_ALLOW_IMAGE_URLS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_image_state(state: Any) -> Any:
+    """Validate an image carried in `state` and replace it with the raw bytes.
+
+    Returns `state` unchanged when it carries no image -- every request a text deployment serves --
+    so the text path is untouched. A refused image is a 400 with the reason, except an oversize one,
+    which is a 413 like an oversized body.
+    """
+    from fastapi import HTTPException      # lazy: `import laya.serve` must not pull fastapi in
+
+    if not isinstance(state, dict):
+        return state
+    present = [key for key in IMAGE_REQUEST_KEYS if key in state]
+    if not present:
+        return state
+    if len(present) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="state carries more than one image key (%s); send exactly one"
+                   % ", ".join(sorted(present)))
+    key = present[0]
+    spec = state[key]
+    if key == "image_path" and isinstance(spec, str):
+        spec = {"path": spec}
+    elif key == "image_url" and isinstance(spec, str):
+        spec = {"url": spec}
+    elif key == "image_base64" and isinstance(spec, str):
+        spec = {"base64": spec}
+    try:
+        data = _vision.read_image_bytes(
+            spec,
+            max_bytes=_image_limit("LAYA_MAX_IMAGE_BYTES", _vision.MAX_IMAGE_BYTES),
+            max_pixels=_image_limit("LAYA_MAX_IMAGE_PIXELS", _vision.MAX_IMAGE_PIXELS),
+            allow_url=_image_urls_allowed())
+    except _vision.ImageRefused as exc:
+        raise HTTPException(
+            status_code=413 if exc.reason == "image_too_large" else 400,
+            detail="%s: %s" % (exc.reason, exc.detail)) from exc
+    rest = {k: v for k, v in state.items() if k not in IMAGE_REQUEST_KEYS}
+    rest["image"] = {"bytes": data}
+    return rest
+
+
+def _state_text_view(state: Any) -> Any:
+    """`state` with any resolved image bytes replaced, so it can be measured as text.
+
+    Image bytes are never tokenized -- they reach the model as a visual block, not as characters --
+    so counting them against `MAX_STATE_CHARS` would refuse a perfectly ordinary image on a
+    character limit that has nothing to do with it. They are bounded by `MAX_IMAGE_BYTES` instead,
+    which is the limit that actually applies.
+    """
+    if not isinstance(state, dict):
+        return state
+    image = state.get("image")
+    if isinstance(image, dict) and isinstance(image.get("bytes"), (bytes, bytearray)):
+        return dict(state, image={"bytes": "<%d bytes>" % len(image["bytes"])})
+    return state
+
+
 def _state_length(state: Any) -> int:
     r"""Length of the state text that will be tokenized; 400 if it has none.
 
@@ -1043,7 +1138,7 @@ def _state_length(state: Any) -> int:
         # never claims a length larger than the state really has.
         return over
     try:
-        return len(json.dumps(state, ensure_ascii=False))
+        return len(json.dumps(_state_text_view(state), ensure_ascii=False))
     except (TypeError, ValueError, RecursionError):
         # A state `serialize_state` cannot render is not a size problem, and the 413 this replaces
         # reported a count nothing had measured: `str()` raises on an integer of over 4300 digits
@@ -1594,6 +1689,10 @@ def create_app(router: Optional[Any] = None):
             raise HTTPException(status_code=400, detail="request body must be an object with a 'questions' field")
         state = body.get("state")
         questions = body["questions"]
+        # Validate and normalise an image carried in the state before anything measures or walks
+        # it: the byte and pixel caps belong to the transport, and a refused image must never reach
+        # a decoder, let alone the model.
+        state = _resolve_image_state(state)
         _check_request_limits(state, questions, MAX_TOURNAMENT_CHOICE_OPTIONS if tournament_group
                               else MAX_CHOICE_OPTIONS)
         _refuse_body_refusals(body)

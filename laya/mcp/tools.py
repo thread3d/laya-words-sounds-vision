@@ -218,9 +218,37 @@ def validate_questions(questions: Any) -> dict:
     return cleaned
 
 
+# An image reaches a tool call as a *reference*, never as content. Base64 in a tool argument is
+# paid for twice -- once in the model's context when it writes the call, once again when the
+# transcript is replayed -- for a payload measured in megabytes, and the cap that exists for
+# request bodies does not exist for a conversation. A path or a URL costs one line.
+IMAGE_REFERENCE_KEYS = ("image", "image_path", "image_url")
+IMAGE_INLINE_KEYS = ("image_base64",)
+
+
 def validate_state(state: Any) -> dict:
+    """A non-empty state object, with image *references* allowed and inline bytes refused.
+
+    A vision checkpoint takes ``{"image_path": ...}`` or ``{"image_url": ...}`` (or ``"image"``
+    holding one of those); this door only checks the shape, because the transport limits belong to
+    the server that actually reads the bytes. What it will not accept is ``image_base64``: see
+    `IMAGE_INLINE_KEYS`.
+    """
     if not isinstance(state, dict) or not state:
         raise ToolError("invalid_state", "state must be a non-empty JSON object")
+    inline = [key for key in IMAGE_INLINE_KEYS if key in state]
+    if inline:
+        raise ToolError(
+            "invalid_state",
+            "state carries %s; an MCP tool argument must not carry inline image bytes. Pass "
+            "\"image_path\" (a file the server can read) or \"image_url\" instead."
+            % ", ".join(sorted(inline)))
+    image = state.get("image")
+    if isinstance(image, dict) and "base64" in image:
+        raise ToolError(
+            "invalid_state",
+            "state['image'] carries inline base64; pass a path or a URL instead, e.g. "
+            "{\"image\": {\"path\": \"invoice.png\"}}")
     return dict(state)
 
 
