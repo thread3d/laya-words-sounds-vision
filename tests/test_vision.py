@@ -930,6 +930,50 @@ def test_the_server_resolves_an_image_and_measures_only_the_text():
         raise AssertionError("%r should have been refused" % (list(spec),))
 
 
+# -- the projector has to survive a save ---------------------------------------------------
+
+def test_the_projector_round_trips_through_a_checkpoint():
+    """It is not in `model.state_dict()`, so a checkpoint that forgets it loads a random one."""
+    import tempfile
+
+    from laya.vision import load_vision_weights, save_vision_weights
+
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    trained = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    with torch.no_grad():
+        trained.projector.proj.weight.add_(0.5)
+        trained.projector.type_vector.add_(0.25)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        save_vision_weights(trained, tmp)
+        assert os.path.exists(os.path.join(tmp, "vision.safetensors"))
+
+        fresh = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+        before = fresh.projector.proj.weight.detach().clone()
+        load_vision_weights(fresh, tmp)
+        assert torch.allclose(fresh.projector.proj.weight.float(),
+                              trained.projector.proj.weight.float(), atol=1e-3)
+        assert not torch.allclose(before, fresh.projector.proj.weight), \
+            "the load must actually change something"
+
+
+def test_a_checkpoint_without_a_projector_is_refused_by_name():
+    import tempfile
+
+    from laya.vision import load_vision_weights
+
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            load_vision_weights(enc, tmp)
+        except FileNotFoundError as exc:
+            assert "vision.safetensors" in str(exc), exc
+            assert "randomly" in str(exc), exc
+        else:
+            raise AssertionError("a vision checkpoint with no projector must not load")
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -983,6 +1027,8 @@ if __name__ == "__main__":
     test_a_path_reference_is_read_with_the_cap()
     test_mcp_refuses_inline_image_bytes_and_accepts_a_reference()
     test_the_server_resolves_an_image_and_measures_only_the_text()
+    test_the_projector_round_trips_through_a_checkpoint()
+    test_a_checkpoint_without_a_projector_is_refused_by_name()
     test_decode_uses_the_modality_temperature_for_image_rows_only()
     test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")

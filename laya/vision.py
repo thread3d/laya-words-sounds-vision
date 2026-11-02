@@ -914,3 +914,57 @@ def _read_url(url, max_bytes, allow_url, timeout, urlparse) -> bytes:
     if len(data) > limit:
         raise ImageRefused("image_too_large", "%s returned more than %d bytes" % (url, limit))
     return data
+
+
+# ------------------------------------------------------------------------------------------------
+# Persisting the trained projector
+# ------------------------------------------------------------------------------------------------
+#
+# `DecisionModel` deliberately has no vision parameters -- a new one would break
+# `load_state_dict(..., strict=True)` for every existing checkpoint -- so the projector lives beside
+# the model and is *not* in `model.state_dict()`. That makes it the one part of a vision checkpoint
+# that a naive save would drop, and the failure is silent in the worst way: every load would build a
+# fresh random projector and answer confidently from it. So it gets its own file, and a checkpoint
+# that declares vision but carries none is refused rather than guessed at.
+
+VISION_WEIGHTS_FILE = "vision.safetensors"
+
+
+def save_vision_weights(encoder: "VisionEncoder", path: str) -> str:
+    """Write the projector's trained tensors into `path` (a directory)."""
+    from safetensors.torch import save_file
+
+    torch = _torch()
+    os.makedirs(path, exist_ok=True)
+    target = os.path.join(path, VISION_WEIGHTS_FILE)
+    payload = {
+        "projector.weight": encoder.projector.proj.weight.detach().cpu().contiguous(),
+        "projector.bias": encoder.projector.proj.bias.detach().cpu().contiguous(),
+        "type_vector": encoder.projector.type_vector.detach().cpu().contiguous(),
+    }
+    save_file({k: v.half() if v.is_floating_point() else v for k, v in payload.items()}, target)
+    del torch
+    return target
+
+
+def load_vision_weights(encoder: "VisionEncoder", path: str, dtype=None) -> "VisionEncoder":
+    """Load the projector's trained tensors from `path` (a directory) into `encoder`."""
+    from safetensors.torch import load_file
+
+    torch = _torch()
+    target = os.path.join(path, VISION_WEIGHTS_FILE) if os.path.isdir(path) else path
+    if not os.path.exists(target):
+        raise FileNotFoundError(
+            "%r is missing: this checkpoint declares vision support, so its projector has to come "
+            "from somewhere. A checkpoint saved without it would answer from a randomly "
+            "initialised projector, which is indistinguishable from a working one." % (target,))
+    weights = load_file(target)
+    weight = weights["projector.weight"].to(encoder.projector.proj.weight.device)
+    bias = weights["projector.bias"].to(encoder.projector.proj.bias.device)
+    type_vector = weights["type_vector"].to(encoder.projector.type_vector.device)
+    target_dtype = dtype or encoder.projector.proj.weight.dtype
+    encoder.projector.proj.weight.data = weight.to(target_dtype)
+    encoder.projector.proj.bias.data = bias.to(target_dtype)
+    encoder.projector.type_vector.data = type_vector.to(target_dtype)
+    del torch
+    return encoder

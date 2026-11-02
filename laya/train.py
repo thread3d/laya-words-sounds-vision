@@ -663,6 +663,13 @@ def save_checkpoint(model, tok, cfg: Dict[str, Any], path: str) -> None:
     os.makedirs(path, exist_ok=True)
     save_file({k: v.detach().half().cpu().contiguous() for k, v in model.state_dict().items()},
               os.path.join(path, "model.safetensors"))
+    # The projector is not part of `state_dict` (DecisionModel deliberately has no vision
+    # parameters, so existing checkpoints keep loading with strict=True), so it is written beside
+    # the weights. Skipping this line is silent: every load would rebuild a random projector.
+    vision_encoder = getattr(model, "vision_encoder", None)
+    if vision_encoder is not None:
+        from .vision import save_vision_weights
+        save_vision_weights(vision_encoder, path)
     model.encoder.config.save_pretrained(os.path.join(path, "encoder"))
     tok.save_pretrained(os.path.join(path, "tokenizer"))
     tmp = os.path.join(path, "rl_agent_config.json.tmp")

@@ -54,7 +54,7 @@ from .common import (
 from .confidence import apply_confidence_gate, check_min_confidence
 from .calibrate import MODALITY_IMAGE, MODALITY_TEXT
 from .vision import (VisualCache, build_vision_encoder, collate_visual, load_pixels,
-                     parse_vision, split_state, visual_plan)
+                     load_vision_weights, parse_vision, split_state, visual_plan)
 from .hooks import (
     HookRegistry, PredictContext, _as_sequence, aggregate_usage, compose_hooks, dispatch,
     normalise_hooks, validate_timeout,
@@ -724,6 +724,8 @@ class Agent(HookRegistry):
             else:
                 self.device = torch.device("cpu")
 
+        # Kept for the vision path, which loads the trained projector from beside the weights.
+        self.model_dir = model_dir
         tok_dir = os.path.join(model_dir, "tokenizer")
         self.tok = _load_tokenizer(tok_dir, self.cfg)
 
@@ -1244,6 +1246,11 @@ class Agent(HookRegistry):
                 self.vision,
                 hidden_size=self.model.encoder.config.hidden_size,
                 dtype=self.dtype if self.device.type != "cuda" else None)
+            # The projector's trained weights are the one part of a vision checkpoint that is not
+            # in `model.safetensors`, so it is loaded explicitly -- and a checkpoint that declares
+            # vision but ships none is refused here rather than answering from noise.
+            load_vision_weights(self.vision_encoder, getattr(self, "model_dir", "") or ".",
+                                dtype=self.dtype if self.device.type != "cuda" else None)
             self.vision_encoder.eval()
         pixels = load_pixels(image_spec, self.vision.image_size)
         encoder = self.vision_encoder
