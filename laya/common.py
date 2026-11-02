@@ -608,9 +608,21 @@ class DecisionModel(nn.Module):
         self.head_checkpointing = False
 
     def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder: bool = False,
-                position_ids=None, option_ids=None):
+                position_ids=None, option_ids=None, inputs_embeds=None):
+        if inputs_embeds is not None and option_ids is not None:
+            # The parallel layout builds its masks from `input_ids`-shaped positions and is not
+            # wired for a vision checkpoint; refusing beats silently running the wrong masks.
+            raise ValueError("inputs_embeds and option_ids cannot both be set: the parallel option "
+                             "layout does not support visual tokens")
         if option_ids is None:
-            h = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            if inputs_embeds is None:
+                h = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            else:
+                # Vision path: the caller has already spliced the projected visual tokens into the
+                # token embeddings and supplied the position ids that separate the two blocks
+                # (laya.vision). The encoder itself is untouched -- it accepts `inputs_embeds`.
+                h = self.encoder(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+                                 position_ids=position_ids).last_hidden_state
         else:
             # Parallel option layout (`parallel_layout`). The head below has no positional
             # encoding, so with order-blind marker embeddings the logits permute with the options.
