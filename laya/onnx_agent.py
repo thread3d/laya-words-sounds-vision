@@ -17,6 +17,7 @@ from laya.common import (
     QTYPES,
     _reuse_question_tokens,
     answer_confidence,
+    build_head,
     build_sequence,
     collapsed_options,
     confidence_from_probs,
@@ -34,6 +35,9 @@ from laya.common import (
     clamp_temperature,
 )
 from laya.confidence import apply_confidence_gate, check_min_confidence
+from laya.vision import VisualCache, load_pixels, parse_vision, split_state, visual_plan
+from laya.vision_onnx import (DECISION_INPUT_NAMES, DECISION_OUTPUT_NAMES,
+                              VISION_INPUT_NAMES, VISION_OUTPUT_NAMES, check_names)
 
 
 def _collate_items_numpy(batch: List[List[Dict[str, Any]]], pad_id: int) -> Dict[str, np.ndarray]:
@@ -71,6 +75,75 @@ def _collate_items_numpy(batch: List[List[Dict[str, Any]]], pad_id: int) -> Dict
         "marker_mask": mmask,
         "qtype": np.array([it["qtype"] for it in items], dtype=np.int64),
     }
+
+
+def _vision_tower_path(decision_path: str) -> str:
+    """`tower.onnx` beside the decision graph, as `export_vision_graphs` writes them."""
+    path = os.path.join(os.path.dirname(os.path.abspath(decision_path)), "tower.onnx")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "this checkpoint has vision support but %r is missing; export it with "
+            "scripts/export_onnx.py's export_vision_graphs, which writes tower.onnx next to the "
+            "decision graph" % (path,))
+    return path
+
+
+def _load_embedding_table(model_dir: str) -> np.ndarray:
+    """The encoder's token embedding table, straight from the checkpoint's safetensors.
+
+    The decision graph starts at `inputs_embeds`, so the runtime needs the one lookup that turns
+    token ids into them. Reading the single tensor keeps the ONNX export at two graphs instead of
+    adding a third that only performs a `gather`.
+    """
+    from safetensors import safe_open
+
+    path = os.path.join(model_dir, "model.safetensors")
+    if not os.path.exists(path):
+        raise FileNotFoundError("vision ONNX runtime needs %r to embed token ids" % (path,))
+    # `framework="np"`: this module never imports torch, and reading the tensor as a torch one
+    # would make the numpy-only ONNX runtime depend on it.
+    for key in ("encoder.embeddings.tok_embeddings.weight",
+                "encoder.embeddings.word_embeddings.weight"):
+        with safe_open(path, "np") as handle:
+            if key in handle.keys():
+                return np.asarray(handle.get_tensor(key), dtype=np.float32)
+    raise KeyError("no token embedding table in %r (looked for tok_embeddings and "
+                   "word_embeddings)" % (path,))
+
+
+def _collate_vision_items(items, embed_table, pad_id: int):
+    """Numpy collation of rows that carry a visual block, mirroring `vision.collate_visual`.
+
+    The splice is a `np.concatenate` per row and then right-padding: a row's own splice point does
+    not move when another row is padded, so nothing needs shifting.
+    """
+    n_visual = items[0]["plan"].n_visual
+    width = max(len(it["ids"]) for it in items) + n_visual
+    hidden = embed_table.shape[1]
+    k_max = max(len(it["markers"]) for it in items)
+
+    embeds = np.zeros((len(items), width, hidden), dtype=np.float32)
+    att = np.zeros((len(items), width), dtype=np.int64)
+    pos = np.zeros((len(items), width), dtype=np.int64)
+    mpos = np.zeros((len(items), k_max), dtype=np.int64)
+    mmask = np.zeros((len(items), k_max), dtype=bool)
+
+    for i, it in enumerate(items):
+        ids = np.asarray(it["ids"], dtype=np.int64)
+        tok = embed_table[ids]
+        splice = it["plan"].splice
+        row = np.concatenate([tok[:splice], np.asarray(it["visual"], dtype=np.float32),
+                              tok[splice:]], axis=0)
+        n = row.shape[0]
+        embeds[i, :n] = row
+        att[i, :n] = 1
+        pos[i, :n] = np.asarray(it["plan"].position_ids, dtype=np.int64)
+        k = len(it["markers"])
+        mpos[i, :k] = np.asarray(it["markers"], dtype=np.int64)
+        mmask[i, :k] = True
+    return {"inputs_embeds": embeds, "attention_mask": att, "position_ids": pos,
+            "marker_pos": mpos, "marker_mask": mmask,
+            "qtype": np.asarray([it["qtype"] for it in items], dtype=np.int64)}
 
 
 class ONNXAgent(HookRegistry):
@@ -182,6 +255,9 @@ class ONNXAgent(HookRegistry):
         # Verify integrity before any file in the checkpoint is parsed or executed.
         verify_digests(model_dir, expected_sha256, onnx_path=onnx_path)
 
+        # Kept for the vision path, which reads the encoder's positional budget from beside the
+        # config rather than guessing it (`_max_positions`).
+        self.model_dir = model_dir
         cfg_path = os.path.join(model_dir, "rl_agent_config.json")
         if not os.path.exists(cfg_path):
             raise FileNotFoundError(
@@ -200,6 +276,13 @@ class ONNXAgent(HookRegistry):
             raise FileNotFoundError(
                 f"ONNX model not found at {onnx_path!r}. Please run export_onnx.py first."
             )
+
+        # Vision. A checkpoint with no "vision" block parses to None and nothing below runs, so a
+        # text ONNX deployment is exactly what it was (spec C6).
+        self.vision = parse_vision(self.cfg)
+        self.tower_session = None
+        self._embed_table = None
+        self._visual_cache = None
 
         # Load Tokenizer.  Keep this compatibility fix in sync with Agent: checkpoints
         # produced by newer Transformers versions can contain TokenizersBackend or a list-valued
@@ -234,6 +317,18 @@ class ONNXAgent(HookRegistry):
                 RuntimeWarning, stacklevel=2,
             )
             self.session = ort.InferenceSession(onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
+
+        # Vision runtime. Two sessions and the token embedding table: the decision graph takes
+        # `inputs_embeds`, so something has to produce them, and the embedding table is the only
+        # part of the encoder that is not in either graph. Reading it from the checkpoint beats a
+        # third graph -- it is one tensor, memory-mapped, and it keeps the export at two graphs.
+        if self.vision is not None:
+            tower_path = _vision_tower_path(onnx_path)
+            self.tower_session = ort.InferenceSession(tower_path, sess_options=so, providers=providers)
+            check_names(self.tower_session, VISION_INPUT_NAMES, VISION_OUTPUT_NAMES, "tower graph")
+            check_names(self.session, DECISION_INPUT_NAMES, DECISION_OUTPUT_NAMES, "decision graph")
+            self._embed_table = _load_embedding_table(model_dir)
+            self._visual_cache = VisualCache(self.cfg.get("vision", {}).get("cache_size", 64))
 
         self.temperature_raw = self.cfg.get("temperature", [1.0, 1.0, 1.0])
         self.temperature_by_options_raw = self.cfg.get("temperature_by_options", {})
@@ -691,6 +786,19 @@ class ONNXAgent(HookRegistry):
     def _encode_state(self, state: Union[str, dict, list], ids: List[str], internal: Dict[str, Any],
                       max_len: int, head_max_len: int) -> List[Dict[str, Any]]:
         """This state's question rows, tokenizing the state once for all of them."""
+        vision_cfg = getattr(self, "vision", None)
+        visual = None
+        text_budget = max_len
+        if vision_cfg is not None:
+            state, image_spec = split_state(state)
+            if image_spec is not None:
+                visual = self._visual_block(image_spec)
+                text_budget = max_len - vision_cfg.n_visual_tokens
+                if text_budget < 16:
+                    raise ValueError(
+                        "vision: %d visual tokens leave %d for the text sequence in max_len=%d; "
+                        "lower vision.n_visual_tokens or raise max_len"
+                        % (vision_cfg.n_visual_tokens, text_budget, max_len))
         truncate_left = isinstance(state, list)
         # Tokenize the shared state once and reuse it across questions, instead of
         # re-serializing and re-tokenizing the same document inside build_sequence per
@@ -705,7 +813,7 @@ class ONNXAgent(HookRegistry):
         for qid in ids:
             q = internal[qid]
             seq, markers, stats, state_stats = build_sequence(
-                self.tok, state, q, max_len, head_max_len,
+                self.tok, state, q, text_budget, head_max_len,
                 option_order=q.get("option_order"),
                 truncate_left=truncate_left, state_ids=state_ids, return_stats=True,
                 return_truncation_stats=True,
@@ -723,9 +831,40 @@ class ONNXAgent(HookRegistry):
                     "head_max_len=%d spent on the question; lower head_max_len, raise max_len, "
                     "or use fewer options"
                     % (qid, len(markers), n_opts, max_len, head_max_len))
-            items.append({"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
-                          "state_stats": state_stats})
+            item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
+                    "state_stats": state_stats,
+                    "modality": "image" if visual is not None else "text"}
+            if visual is not None:
+                head_ids, _, _ = build_head(self.tok, q, head_max_len,
+                                            option_order=q.get("option_order"))
+                plan = visual_plan(vision_cfg, text_len=len(seq), markers=markers,
+                                   head_len=len(head_ids), max_len=max_len,
+                                   max_position_embeddings=self._max_positions(),
+                                   option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                item["visual"] = visual
+                item["plan"] = plan
+                item["markers"] = plan.marker_positions
+            items.append(item)
         return items
+
+    def _max_positions(self) -> int:
+        """The encoder's positional budget, read from the checkpoint when it states one."""
+        cfg_path = os.path.join(getattr(self, "model_dir", "") or "", "encoder", "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path) as handle:
+                return int(json.load(handle).get("max_position_embeddings", 8192))
+        return 8192
+
+    def _visual_block(self, image_spec):
+        """Encode one image through the tower session, memoised on its normalised pixels."""
+        pixels = load_pixels(image_spec, self.vision.image_size)
+        arr = ((pixels.numpy() - self.vision.pixel_mean) / self.vision.pixel_std)[None, ...]
+
+        def encode(batch):
+            return self.tower_session.run(["visual_embeds"],
+                                          {"pixel_values": batch})[0][0]
+
+        return self._visual_cache.get_or_encode(pixels, lambda _px: encode(arr))
 
     def _decode_answers(self, logits, act, items: List[Dict[str, Any]], ids: List[str],
                         internal: Dict[str, Any], offset: int,
@@ -839,7 +978,12 @@ class ONNXAgent(HookRegistry):
                 indices = order[offset:offset + chunk]
                 per_state_items = [encoded[i] for i in indices]
 
-                ort_inputs = _collate_items_numpy(per_state_items, self.tok.pad_token_id)
+                if any("visual" in it for row in per_state_items for it in row):
+                    ort_inputs = _collate_vision_items(
+                        [it for row in per_state_items for it in row],
+                        self._embed_table, self.tok.pad_token_id)
+                else:
+                    ort_inputs = _collate_items_numpy(per_state_items, self.tok.pad_token_id)
 
                 # Run ONNX inference
                 ort_outs = self.session.run(["logits", "act_logits"], ort_inputs)
