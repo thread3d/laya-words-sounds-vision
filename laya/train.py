@@ -41,8 +41,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import torch
 
 from .calibrate import MIN_TYPE_N, fit_abstention_thresholds, fit_temperature_map
-from .vision import (VisualCache, build_vision_encoder, load_pixels, parse_vision,
-                     split_state, visual_plan)
+from .vision import (VisualCache, build_vision_encoder, load_pixels, local_tower_dir,
+                     parse_vision, split_state, visual_plan)
 from .common import (
     uses_state_conditioned_layout,
     OPTION_LAYOUTS,
@@ -992,17 +992,54 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
 @torch.no_grad()
 def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: torch.device,
                         max_len: int, head_max_len: int, batch_size: int = 16, parallel: bool = False,
-                        vision=None, embed_fn=None, max_positions: int = 8192):
-    """`(qtype, logits, target, k)` records for `fit_temperature_map`, options in canonical order."""
+                        vision=None, embed_fn=None, max_positions: int = 8192, projector=None,
+                        state_conditioned: bool = False):
+    """`(qtype, logits, target, k)` records for `fit_temperature_map`, options in canonical order.
+
+    A vision checkpoint has to be *evaluated* through the vision path. These records feed both the
+    before/after accuracy in the training report and the temperature fit, so skipping the block
+    here does not fail loudly: it evaluates a text-only model, reports chance-level accuracy for a
+    checkpoint that answers its held-out set at 0.62, and fits a temperature to the wrong
+    distribution.
+    """
     model.eval()
     records = []
     for start in range(0, len(items), batch_size):
         chunk = items[start:start + batch_size]
-        batch = collate_items([[encode_item(tok, it, max_len, head_max_len, parallel=parallel) for it in chunk]],
-                              tok.pad_token_id)
-        logits = _forward(model, batch, device, amp=False, detach_encoder=False).cpu().numpy()
-        for row, it in zip(logits, chunk):
-            records.append((it["qtype"], row[:it["k"]], it["target"], it["k"]))
+        if vision is not None and projector is not None:
+            chunk = [_project_visual(it, projector) for it in chunk]
+        # A state-conditioned checkpoint reads one row per option, so evaluation has to encode
+        # that way too. Building a joint row and slicing `row[:k]` out of a one-marker row does not
+        # fail -- it silently scores a sequence the checkpoint never saw, and reports chance-level
+        # accuracy for a model that answers its held-out set at 0.91.
+        encoded = []
+        if state_conditioned:
+            for it in chunk:
+                for slot in range(it["k"]):
+                    row = encode_item(tok, it, max_len, head_max_len, parallel=parallel,
+                                      vision=vision, max_positions=max_positions, only_option=slot)
+                    # One marker, so one target weight -- the option's own share of the question's
+                    # distribution. The full target belongs to the group, not to the row.
+                    row["target"] = [float(it["target"][slot])]
+                    encoded.append(row)
+        else:
+            encoded = [encode_item(tok, it, max_len, head_max_len, parallel=parallel, vision=vision,
+                                   max_positions=max_positions) for it in chunk]
+        batch = collate_training_batch(encoded, tok.pad_token_id,
+                                       embed_fn=embed_fn if vision is not None else None)
+        logits = _forward(model, batch, device, amp=False,
+                          detach_encoder=vision is None).cpu().numpy()
+        cursor = 0
+        for it in chunk:
+            if state_conditioned:
+                # One score per option, gathered across the item's own rows -- the same
+                # normalisation `_decode_answers` applies at inference.
+                rows = logits[cursor:cursor + it["k"], 0]
+                cursor += it["k"]
+                records.append((it["qtype"], rows, it["target"], it["k"]))
+            else:
+                records.append((it["qtype"], logits[cursor, :it["k"]], it["target"], it["k"]))
+                cursor += 1
     return records
 
 
@@ -1280,9 +1317,12 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     max_positions = int(getattr(model.encoder.config, "max_position_embeddings", 8192))
     embed_fn = None
     encode_visual = None
+    projector = None
     if vision is not None:
-        encoder = build_vision_encoder(vision, hidden_size=model.encoder.config.hidden_size)
+        encoder = build_vision_encoder(vision, hidden_size=model.encoder.config.hidden_size,
+                                       tower_dir=local_tower_dir(model_dir))
         model.vision_encoder = encoder
+        projector = encoder.projector
         embed_fn = _embedding_lookup(model)
         encode_visual = _visual_encoder_fn(encoder)
         print("vision checkpoint: tower %s, %d visual tokens, modality dropout %g"
@@ -1399,7 +1439,10 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     # Evaluate base checkpoint on eval items prior to training
     before_eval = None
     if eval_items:
-        base_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len, parallel=parallel)
+        base_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len,
+                                           parallel=parallel, vision=vision, embed_fn=embed_fn,
+                                           projector=projector, max_positions=max_positions,
+                                           state_conditioned=uses_state_conditioned_layout(cfg))
         base_temp = cfg.get("temperature")
         base_temp_by_options = cfg.get("temperature_by_options")
         before_eval = evaluate_records(base_records, base_temp, base_temp_by_options)
@@ -1413,7 +1456,10 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
                           vision=vision, embed_fn=embed_fn, max_positions=max_positions,
                           state_conditioned=uses_state_conditioned_layout(cfg))
 
-    records = calibration_records(model, tok, calib_items, dev, max_len, head_max_len, parallel=parallel)
+    records = calibration_records(model, tok, calib_items, dev, max_len, head_max_len,
+                                  parallel=parallel, vision=vision, embed_fn=embed_fn,
+                                  projector=projector, max_positions=max_positions,
+                                  state_conditioned=uses_state_conditioned_layout(cfg))
     collapse_msg = prior_collapse_message(records)
     if collapse_msg:
         # Same channel as the weak-calibration notes: a checkpoint that predicts the
@@ -1441,7 +1487,10 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     after_eval = None
     comparison = None
     if eval_items:
-        after_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len, parallel=parallel)
+        after_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len,
+                                            parallel=parallel, vision=vision, embed_fn=embed_fn,
+                                            projector=projector, max_positions=max_positions,
+                                            state_conditioned=uses_state_conditioned_layout(cfg))
         after_eval = evaluate_records(after_records, fitted["temperature"], fitted["temperature_by_options"])
         comparison = {
             "delta_accuracy": round(after_eval["accuracy"] - before_eval["accuracy"], 4),

@@ -206,6 +206,34 @@ def test_a_state_conditioned_run_learns_and_moves_the_head():
         "the head did not move through the grouped objective"
 
 
+def test_evaluation_scores_a_state_conditioned_checkpoint_the_way_it_was_trained():
+    """`calibration_records` must encode the checkpoint's own layout.
+
+    Building a joint row for a state-conditioned checkpoint does not fail: it scores a sequence
+    the model never saw and reports chance-level accuracy -- which is exactly what happened, a
+    0.91 checkpoint reported at 0.25.
+    """
+    from laya.train import TrainConfig, calibration_records, items_from_rows, train_model
+
+    torch.manual_seed(0)
+    agent = _agent()
+    model, tok = agent.model, agent.tok
+    question = {"type": "choice", "instructions": "pick", "criteria": ["alpha", "beta", "gamma"]}
+    rows = [{"state": "state %d" % i, "questions": {"q": question},
+             "expected": {"q": ["alpha", "beta", "gamma"][i % 3]}} for i in range(9)]
+    items, _ = items_from_rows(tok, rows, 512, 192)
+
+    joint = calibration_records(model, tok, items, torch.device("cpu"), 512, 192)
+    grouped = calibration_records(model, tok, items, torch.device("cpu"), 512, 192,
+                                  state_conditioned=True)
+    # one record per question either way, and each carries one logit per option
+    assert len(joint) == len(grouped) == len(items)
+    for j, g in zip(joint, grouped):
+        assert len(j[1]) == 3 and len(g[1]) == 3, (j[1].shape, g[1].shape)
+    assert not all(abs(float(a[1][0]) - float(b[1][0])) < 1e-6 for a, b in zip(joint, grouped)), \
+        "the two layouts must produce different scores; identical ones mean the encoding was reused"
+
+
 if __name__ == "__main__":
     test_the_layout_flag_reads_the_config()
     test_each_option_gets_its_own_row_with_one_marker()
@@ -216,4 +244,5 @@ if __name__ == "__main__":
     test_the_grouped_objective_normalises_across_a_question_not_a_row()
     test_encoding_one_option_gives_a_row_with_one_marker()
     test_a_state_conditioned_run_learns_and_moves_the_head()
+    test_evaluation_scores_a_state_conditioned_checkpoint_the_way_it_was_trained()
     print("all state-conditioned tests passed")
