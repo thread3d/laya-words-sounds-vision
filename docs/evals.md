@@ -621,6 +621,54 @@ name a commit for a checkpoint given as a local directory: `Agent.revision` and 
 both stay `None` when nothing was downloaded (`laya/agent.py:574`, `laya/onnx_agent.py:107`), so that
 entry is recorded as `null` rather than dropped.
 
+## Vision gates: does it actually look at the image?
+
+Two subcommands answer the questions an accuracy score cannot. Both run the same dataset twice and
+compare the two passes; both are the gates in `docs/vision-decision-system.md` §9.1 and §9.2b.
+
+### `ablate` — vision necessity
+
+```
+laya-evals ablate vision.jsonl --min-gain 0.35 --json report.json
+```
+
+Every row whose `state` carries an image is answered twice: as given, and with the image removed.
+The report gives accuracy on both sides per tag slice and the drop between them. `--min-gain X`
+makes it a verdict — the run exits non-zero unless accuracy falls by at least `X` when the pixels
+are taken away.
+
+A model that barely notices is the documented default failure of multimodal fusion: the encoder
+learns to answer from the text and the image becomes decoration. Accuracy alone cannot see that,
+which is why this is a blocking gate rather than a metric.
+
+Rows carrying no image are counted under `rows_text_only` and left out of the drop — there is
+nothing to remove, and including them would dilute the number toward zero. The pass is also
+required to be a no-op on those rows: if a text row's answer moves, the pass itself is not
+deterministic, every other number in the report is noise, and `text_only_unchanged` goes false.
+
+An image-only state is stripped to an empty string rather than to `{}`, since an empty object is
+still a document to serialize and the model would be asked the question against text it was never
+meant to see.
+
+### `flip` — option-order invariance
+
+```
+laya-evals flip vision.jsonl --seed 0 --max-flip-rate 0.02 --json report.json
+```
+
+Every choice question is answered twice, the second time with its options permuted. The report
+gives the flip rate overall and per tag. `--max-flip-rate X` makes it a verdict.
+
+This catches a model that scores options *against each other* instead of against the image: its
+answer follows position, so a caller who reorders a list — which carries no information — gets a
+different decision. A state-conditioned design reaches zero; the published figure for joint
+candidate encoding is 8–10%.
+
+Answers stay keyed by the original criteria, so a flip is a changed label, not a re-indexed one.
+Questions with fewer than two options are passed through unpermuted, `--seed` makes the
+permutations reproducible, and a question either pass failed to answer is counted under
+`unanswered` rather than scored as agreement.
+
 ## Adding the real labelled set
 
 Drop a JSONL in `research/evals/` and a reviewed baseline beside it, then point a workflow (or

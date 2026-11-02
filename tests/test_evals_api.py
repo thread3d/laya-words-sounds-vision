@@ -159,7 +159,8 @@ def _subparsers(parser):
 
 
 _subs = _subparsers(evals_cli._build_parser())
-check("laya-evals subcommands", sorted(_subs), ["agreement", "compare", "evidence", "run", "validate"])
+check("laya-evals subcommands", sorted(_subs),
+      ["ablate", "agreement", "compare", "evidence", "flip", "run", "validate"])
 
 _unhelped, _unstated, _options = [], [], {}
 for _sub, _parser in sorted(_subs.items()):

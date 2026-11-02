@@ -269,6 +269,30 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="allowed absolute drift; repeatable")
     compare.add_argument("--gate-policy", metavar="FILE",
                          help="apply opt-in per-slice quality rules from a JSON policy")
+    ablate = sub.add_parser(
+        "ablate",
+        help="gate 1: re-answer every row with its image removed, and report the accuracy lost")
+    ablate.add_argument("dataset", help="JSONL file whose rows carry an image in their state")
+    ablate.add_argument("--model", help="force a checkpoint instead of auto-routing")
+    ablate.add_argument("--device", help="torch device, e.g. cpu or cuda")
+    ablate.add_argument("--min-gain", type=float, metavar="X",
+                        help="fail unless accuracy drops by at least X when the image is removed "
+                             "(the spec's gate for an image-required family is 0.35)")
+    ablate.add_argument("--json", metavar="PATH", help="write the report as JSON")
+
+    flip = sub.add_parser(
+        "flip",
+        help="gate 2b: re-answer every choice question with its options permuted, and report how "
+             "often the answer changed")
+    flip.add_argument("dataset", help="JSONL file of choice questions")
+    flip.add_argument("--model", help="force a checkpoint instead of auto-routing")
+    flip.add_argument("--device", help="torch device, e.g. cpu or cuda")
+    flip.add_argument("--seed", type=int, default=0, help="permutation seed (default 0)")
+    flip.add_argument("--max-flip-rate", type=float, metavar="X",
+                      help="fail unless the flip rate is at most X (a state-conditioned design "
+                           "should reach 0; 0.02 is a reasonable ceiling)")
+    flip.add_argument("--json", metavar="PATH", help="write the report as JSON")
+
     evidence_cmd = sub.add_parser("evidence",
                                   help="read-only evidence inspection over a checkpoint config and an eval report",
                                   epilog="example: laya-evals evidence --checkpoint ./my-checkpoint --report report.json")
@@ -370,6 +394,58 @@ def _cmd_validate(args) -> int:
     questions = sorted({qid for example in dataset.examples for qid in example.questions})
     print("%d examples, %d question id(s): %s" % (len(dataset), len(questions), ", ".join(questions)))
     return 0
+
+
+def _load_runner(args):
+    """The same runner `run` builds, so a gate scores the checkpoint the caller named."""
+    import laya
+
+    if getattr(args, "device", None):
+        return laya.load(device=args.device)
+    if getattr(args, "model", None):
+        return laya.load(args.model)
+    return laya.load()
+
+
+def _emit(report, path) -> None:
+    import json
+    print(json.dumps(report, indent=1, sort_keys=True))
+    if path:
+        with open(path, "w") as handle:
+            json.dump(report, handle, indent=1, sort_keys=True)
+            handle.write("\n")
+
+
+def _gate_exit(report) -> int:
+    """0 when the gate passed or was not judged, 1 when it failed."""
+    return 0 if report.get("passed") is not False else 1
+
+
+def _cmd_ablate(args) -> int:
+    """`laya-evals ablate` -- the vision-necessity gate (spec §9.1)."""
+    from .evals_vision import image_ablation
+
+    dataset = evals.Dataset.from_jsonl(args.dataset)
+    report = image_ablation(_load_runner(args), dataset, min_gain=args.min_gain)
+    _emit(report, args.json)
+    if report["rows_with_image"] == 0:
+        print("no row carries an image; nothing to ablate", file=sys.stderr)
+        return 1
+    return _gate_exit(report)
+
+
+def _cmd_flip(args) -> int:
+    """`laya-evals flip` -- the option-order invariance gate (spec §9.2b)."""
+    from .evals_vision import option_order_flip_rate
+
+    dataset = evals.Dataset.from_jsonl(args.dataset)
+    report = option_order_flip_rate(_load_runner(args), dataset, seed=args.seed,
+                                    max_flip_rate=args.max_flip_rate)
+    _emit(report, args.json)
+    if report["questions_compared"] == 0:
+        print("no choice question was answered twice; nothing to compare", file=sys.stderr)
+        return 1
+    return _gate_exit(report)
 
 
 def _warn_no_value(extra: Sequence[evals.Evaluator], report: evals.EvalReport) -> None:
@@ -634,6 +710,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_run(args)
         if args.command == "evidence":
             return _cmd_evidence(args)
+        if args.command == "ablate":
+            return _cmd_ablate(args)
+        if args.command == "flip":
+            return _cmd_flip(args)
         return _cmd_compare(args)
     except EvalError as exc:
         # A malformed dataset, an unreadable report, or a mistyped pin is a usage error, not a

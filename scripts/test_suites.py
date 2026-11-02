@@ -55,6 +55,7 @@ SCRIPT_SUITES = [
     "tests/test_shortlist.py",
     "tests/test_decision_model.py",
     "tests/test_vision.py",
+    "tests/test_evals_vision.py",
     "tests/test_head_checkpointing.py",
     "tests/test_truncation.py",
     "tests/test_packaging.py",
