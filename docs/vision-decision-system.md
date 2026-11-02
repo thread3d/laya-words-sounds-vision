@@ -1,7 +1,14 @@
 # Laya Vision — Specification for a Vision Decision System
 
-**Status:** proposal for review · **Date:** 2026-11-02 · **Basis:** Laya 0.4.18 checkout at
-`~/projects/Laya/laya` (package `laya/`, checkpoints under `models/`)
+**Status:** implemented on the `vision` branch, except where marked otherwise · **Date:** 2026-11-02
+· **Basis:** Laya 0.4.18 checkout at `~/projects/Laya/laya` (package `laya/`, checkpoints under
+`models/`); the implementation landed between 0.4.22 and 0.4.37
+
+> **This document started as a proposal and is now mostly a description.** Everything it specifies
+> that can be built without a trained vision checkpoint has been built, on the `vision` branch, with
+> a test behind it — Appendix E lists section by section what is real and what is deferred, and why.
+> What remains is the research program the document itself schedules (M0-M5): training a checkpoint,
+> then letting the measurements decide the questions §14 leaves open.
 
 This document specifies how to give Laya a vision encoder **without giving up what makes Laya
 worth using**: one forward pass, no text generation, typed answers, and a calibrated probability
@@ -1617,3 +1624,61 @@ literature is single-ecosystem preprints from one group of authors, and several 
 (flip rates, the sufficiency negative result, the RLCD deficit) rest on one lab each. They are
 strong enough to design against and not strong enough to bet the roadmap on — which is exactly why
 §13.1 makes each of them a cheap pre-registered experiment rather than an assumption.
+
+---
+
+## Appendix E — implementation status
+
+Written last, and the only appendix that will go stale. It exists because a document that reads as
+a proposal is a poor map of a branch that now contains the thing: a reader arriving at `vision`
+should be able to tell at a glance what is real, what is deliberately deferred, and what would
+have to happen first.
+
+| § | what | status | where | test |
+|---|---|---|---|---|
+| 2 | the six invariants (C1-C6) | **held** — no generation, typed answers, calibrated confidence, abstention, determinism, and byte-identical text sequences | everywhere | `test_vision.py` asserts the no-vision-block path explicitly |
+| 4.1 | visual-token layout, type vector, reserved position block, `[VIS_SUMMARY]` | **implemented** | `laya/vision.py` (`vision_plan`, `assemble_inputs_embeds`, `PooledProjector`) | `test_vision.py` |
+| 4.1.1 | option independence (state-conditioned scoring) | **implemented** as `option_layout="state_conditioned"` | `laya/agent.py` | `test_state_conditioned.py` — permuting options does not change the answer |
+| 4.2 | vision tower, `keep_layers` truncation | **implemented** | `laya/vision.py` (`load_tower`) | `test_vision.py` |
+| 4.3 | compression | **baseline only**: `adaptive_avg` / `none`. Coarse-to-fine is *measurement-gated* by the spec itself, and the Perceiver resampler is deliberately absent | `PooledProjector` | `test_vision.py` |
+| 4.4 | tiers and the token budget | **implemented as configuration** (`n_visual_tokens`, `image_size`, `max_len`) | checkpoint config | `test_vision.py` |
+| 4.5 | the cascade | **implemented** | `laya/cascade.py` | `test_cascade.py` |
+| 4.6 | encode the image once, reuse across questions | **implemented** (`VisualCache`, keyed on normalised pixels) | `laya/vision.py`, `laya/agent.py` | `test_vision.py`, `test_train_vision.py` |
+| 4.7 | head and abstention | head **unchanged**; `act_head` is **not retrained** — the spec requires it to beat plain confidence before shipping, which needs data | — | — |
+| 5 | tower selection | **implemented as a config default** (SigLIP2 base/16); the ladder, PE and C-RADIO are configuration, not code | `VisionConfig` | — |
+| 6 | the data engine | **not implemented**: it is a data program, not code. The *contract* it needs (image rows, `gold` targets, provenance) is supported by §7's loader | — | — |
+| 7 | training | **implemented**: `items_from_rows(vision=, encode_visual=)`, `modality_dropout`, `soft-ce` default for vision | `laya/train.py` | `test_train_vision.py` |
+| 8 | calibration on the modality axis | **implemented** | `laya/calibrate.py` | `test_vision.py` |
+| 9.1, 9.2b | the two gates | **implemented** as `laya-evals ablate` / `laya-evals flip` | `laya/evals_vision.py` | `test_evals_vision.py` |
+| 10.1 | request surface | **implemented for image references in `state`**. The `PUT /v1/images/{sha256}` upload endpoint is deferred — it is a convenience on top of a working path | `laya/serve.py`, `laya/mcp/tools.py` | `test_vision.py`, `test_serve.py` |
+| 10.2 | determinism: EXIF, sRGB, alpha, normalisation, pixel-hash cache key | **implemented** | `laya/vision.py` (`_to_rgb`, `load_pixels`) | `test_vision.py` |
+| 10.3 | backends | **eager and ONNX, both graphs and the runtime**. TileLang is deferred and refused by name; `compile` is refused per call for visual batches | `laya/vision_onnx.py`, `laya/onnx_agent.py`, `scripts/export_onnx.py` | `test_vision_onnx.py`, `test_onnx_vision.py` |
+| 10.4 | packaging and routing | **implemented**: offline tower bundle, `Router(vision_model=...)` | `laya/train.py`, `laya/router.py` | `test_router_vision.py`, `test_vision.py` |
+| 11 | security | **implemented where it is code**: URL fetching off by default (SSRF), byte and pixel caps checked before any decoder runs, no inline base64 through an MCP tool argument. Training against injection is data work | `laya/vision.py`, `laya/serve.py` | `test_vision.py` |
+| 14 | the open questions | **unchanged and unresolved** — each needs a trained checkpoint and a measurement, which is the point | — | — |
+
+### What a trained checkpoint would unlock
+
+The branch can build, calibrate, evaluate, export and serve a vision checkpoint; what it cannot do
+is produce one, because that needs a GPU this sandbox does not expose and a data engine that is a
+program of work rather than a patch. In order:
+
+1. **M0's tower sweep** (§13.1, §4.4) — batch-1 fp16 on the target GPU, which turns every latency
+   estimate in §4.4 into a measurement and picks the tower.
+2. **The 150k-item probe** (§6.6) and the Stage-1 alignment run, gated on **image-ablation gain**
+   (`laya-evals ablate --min-gain`). If that gate fails, the project pivots to a cascade-only shape
+   and this document's §4 is the wrong design.
+3. **Stage 2**, then calibration on real data (`fit_temperature_map(..., modalities=...)`) and the
+   act head.
+
+### Bugs found by building it
+
+Recorded because each one would have failed *confidently* rather than loudly, and because they are
+the argument for the gates in §9 rather than a claim that the code is finished:
+
+- the projector was not in `model.state_dict()`, so every load would have rebuilt it at random;
+- a phone photo would have decoded sideways, and a transparent region would have composited onto
+  black;
+- a checkpoint named a Hub repository for its tower, so the first request needed the network;
+- `predict_long` sized every window one visual block too wide, so the tail of each window reached no
+  model while the report said it had.
