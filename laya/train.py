@@ -535,7 +535,12 @@ def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
     if layout:
         encoded["layout"] = layout[0]
     if visual is not None and vision is not None and not drop_visual:
-        head_ids, _, _ = build_head(tok, item["q"], head_max_len, option_order=option_order)
+        # The splice point belongs to the sequence that was actually built. Asking `build_head`
+        # for the *full* head while the row holds one option puts the block past the question and
+        # into the state text -- a different position from the one `Agent._encode_state` uses, so
+        # training and inference would splice the same picture in two different places.
+        head_ids, _, _ = build_head(tok, item["q"], head_max_len, option_order=option_order,
+                                    only_option=only_option)
         plan = visual_plan(vision, text_len=len(ids), markers=markers, head_len=len(head_ids),
                            max_len=max_len, max_position_embeddings=max_positions,
                            option_tokens=(len(head_ids) - markers[0]) if markers else 0)

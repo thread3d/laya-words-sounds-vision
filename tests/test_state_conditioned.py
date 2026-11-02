@@ -234,6 +234,53 @@ def test_evaluation_scores_a_state_conditioned_checkpoint_the_way_it_was_trained
         "the two layouts must produce different scores; identical ones mean the encoding was reused"
 
 
+def test_the_splice_point_belongs_to_the_row_that_was_built():
+    """One option means a shorter head, so the block must be planned against *that* head.
+
+    Asking `build_head` for the full head while the row holds a single option put the block past
+    the question and into the state text -- a different position from the one
+    `Agent._encode_state` computes, so training and inference spliced the same picture in two
+    different places. Nothing failed; the two paths just disagreed.
+    """
+    import torch
+
+    from laya.train import _project_visual, encode_item, items_from_rows
+    from laya.vision import build_vision_encoder, parse_vision
+
+    agent = _agent()
+    vision = parse_vision({"vision": {"n_visual_tokens": 4}})
+
+    class _Tower(torch.nn.Module):
+        class config:
+            hidden_size = 8
+
+        def forward(self, pixel_values):
+            return type("O", (), {
+                "last_hidden_state": torch.zeros(pixel_values.size(0), 6, 8)})()
+
+    enc = build_vision_encoder(vision, hidden_size=agent.model.encoder.config.hidden_size,
+                               tower=_Tower())
+    rows = [{"state": {"text": "a short state", "image": {"pixels": torch.zeros(3, 32, 32)}},
+             "questions": {"q": QUESTION}, "expected": {"q": "beta"}}]
+    items, skipped = items_from_rows(agent.tok, rows, 512, 192, vision=vision,
+                                     encode_visual=lambda px: enc.encode_patches(px.unsqueeze(0))[0])
+    assert skipped == {} and len(items) == 1, skipped
+
+    row = encode_item(agent.tok, _project_visual(items[0], enc.projector), 512, 192,
+                      vision=vision, only_option=1)
+    plan = row["plan"]
+    assert plan.splice < len(row["ids"]), "the block must land inside the sequence"
+    # Between the marker and the splice sit the option's own tokens and a separator -- a handful,
+    # not the whole state. The bound is loose because the test tokenizer maps characters, not words.
+    assert plan.splice - row["markers"][0] <= 10, \
+        "the block must sit after its own option, not after the state (%d vs marker %d)" \
+        % (plan.splice, row["markers"][0])
+    # and the full-head plan would have been further along, which is the bug this pins
+    joint = encode_item(agent.tok, _project_visual(items[0], enc.projector), 512, 192, vision=vision)
+    assert joint["plan"].splice > plan.splice, \
+        "a three-option head is longer than a one-option head; the splice points must differ"
+
+
 if __name__ == "__main__":
     test_the_layout_flag_reads_the_config()
     test_each_option_gets_its_own_row_with_one_marker()
@@ -245,4 +292,5 @@ if __name__ == "__main__":
     test_encoding_one_option_gives_a_row_with_one_marker()
     test_a_state_conditioned_run_learns_and_moves_the_head()
     test_evaluation_scores_a_state_conditioned_checkpoint_the_way_it_was_trained()
+    test_the_splice_point_belongs_to_the_row_that_was_built()
     print("all state-conditioned tests passed")
