@@ -974,6 +974,82 @@ def test_a_checkpoint_without_a_projector_is_refused_by_name():
             raise AssertionError("a vision checkpoint with no projector must not load")
 
 
+# -- decoding: the normalisation C5 requires (spec §10.2) ---------------------------------
+
+def _have_pillow():
+    try:
+        import PIL  # noqa: F401
+        return True
+    except ImportError:
+        print("SKIP: Pillow is not installed (laya[vision])")
+        return False
+
+
+def _encode(im, fmt="PNG", **kw):
+    import io
+    buffer = io.BytesIO()
+    im.save(buffer, fmt, **kw)
+    return buffer.getvalue()
+
+
+def test_exif_orientation_is_applied():
+    """A phone photo stores its pixels unrotated; ignoring the tag hands over a sideways picture."""
+    if not _have_pillow():
+        return
+    from PIL import Image
+
+    from laya.vision import load_pixels
+
+    image = Image.new("RGB", (40, 20), (255, 0, 0))
+    image.paste((0, 0, 255), (0, 0, 20, 20))          # left half blue, right half red
+    exif = Image.Exif()
+    exif[0x0112] = 6                                  # Orientation 6: rotate 90 clockwise
+    plain = load_pixels(_encode(image, "JPEG"), 8)
+    tagged = load_pixels(_encode(image, "JPEG", exif=exif.tobytes()), 8)
+    assert not torch.allclose(plain, tagged, atol=0.05), \
+        "the orientation tag was ignored: a rotated photo would decode sideways"
+
+
+def test_transparency_composites_onto_white_not_black():
+    if not _have_pillow():
+        return
+    from PIL import Image
+
+    from laya.vision import load_pixels
+
+    out = load_pixels(_encode(Image.new("RGBA", (8, 8), (255, 0, 0, 0))), 8)
+    assert torch.allclose(out, torch.ones_like(out), atol=1e-6), \
+        "a transparent region is absence of evidence; black would make it a dark object: %r" % (out[:, 0, 0].tolist(),)
+
+
+def test_palette_and_cmyk_convert_through_srgb():
+    if not _have_pillow():
+        return
+    from PIL import Image
+
+    from laya.vision import load_pixels
+
+    palette = Image.new("P", (8, 8), 0)
+    palette.putpalette([255, 0, 0] + [0] * 765)
+    red = load_pixels(_encode(palette), 8)
+    assert abs(float(red[0, 0, 0]) - 1.0) < 0.02 and float(red[1, 0, 0]) < 0.02, red[:, 0, 0].tolist()
+
+    cmyk = load_pixels(_encode(Image.new("CMYK", (8, 8), (0, 255, 255, 0)), "TIFF"), 8)
+    assert float(cmyk[0, 0, 0]) > 0.9 and float(cmyk[1, 0, 0]) < 0.1, cmyk[:, 0, 0].tolist()
+
+
+def test_the_same_bytes_decode_identically():
+    """C5: same pixels, same decision -- so the decode itself has to be a pure function."""
+    if not _have_pillow():
+        return
+    from PIL import Image
+
+    from laya.vision import load_pixels
+
+    data = _encode(Image.new("RGB", (16, 16), (12, 34, 56)))
+    assert torch.equal(load_pixels(data, 8), load_pixels(data, 8))
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -1029,6 +1105,10 @@ if __name__ == "__main__":
     test_the_server_resolves_an_image_and_measures_only_the_text()
     test_the_projector_round_trips_through_a_checkpoint()
     test_a_checkpoint_without_a_projector_is_refused_by_name()
+    test_exif_orientation_is_applied()
+    test_transparency_composites_onto_white_not_black()
+    test_palette_and_cmyk_convert_through_srgb()
+    test_the_same_bytes_decode_identically()
     test_decode_uses_the_modality_temperature_for_image_rows_only()
     test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")

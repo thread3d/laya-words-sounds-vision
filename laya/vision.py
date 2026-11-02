@@ -538,7 +538,7 @@ def load_pixels(spec, image_size: int = 224):
         raise TypeError("an image must be a path/base64 string or {'pixels': ...}, got %s"
                         % type(spec).__name__)
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except ImportError as exc:                                  # pragma: no cover - optional dep
         raise ImportError(
             "loading an image needs Pillow: `pip install laya[vision]`, or pass "
@@ -558,10 +558,43 @@ def load_pixels(spec, image_size: int = 224):
     else:
         src = spec
     with Image.open(src) as im:
-        im = im.convert("RGB")
+        im = _to_rgb(im, Image, ImageOps)
         im = im.resize((image_size, image_size))
         arr = np.asarray(im, dtype="float32") / 255.0
     return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+
+
+def _to_rgb(im, Image, ImageOps):
+    """The normalisation C5 requires, in the order the specification lists it (§10.2).
+
+    Three steps a naive decode skips, each of which silently changes the pixels:
+
+    * **EXIF orientation.** A phone photo carries the rotation in its metadata and stores the
+      sensor's pixels unrotated. Ignoring the tag hands the tower a sideways picture -- not a
+      degraded one, a *different* one -- and the decision follows it.
+    * **alpha onto white.** A transparent region has no colour; compositing it onto black rather
+      than white turns "nothing here" into "a dark object", which is a different image and a
+      different answer.
+    * **sRGB.** A CMYK scan or a palette image is not laid out as RGB bytes, and `convert` maps it
+      through the sRGB space the tower was trained on rather than reading the raw channels.
+
+    The order matters: orientation first (so the composite happens on the upright image), alpha
+    before the resize (so a transparent edge does not bleed into its neighbours), and the colour
+    conversion last.
+    """
+    transposed = ImageOps.exif_transpose(im)
+    if transposed is not None:                       # older Pillow returns None when there is no tag
+        im = transposed
+    if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+        im = im.convert("RGBA")
+        # White, not black: a transparent corner is absence of evidence, and black would make it
+        # a very dark object.
+        backdrop = Image.new("RGB", im.size, (255, 255, 255))
+        backdrop.paste(im, mask=im.split()[-1])
+        im = backdrop
+    elif im.mode != "RGB":
+        im = im.convert("RGB")
+    return im
 
 
 def _looks_base64(spec: str) -> bool:
