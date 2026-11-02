@@ -267,6 +267,41 @@ in
       '';
     };
 
+    maxImageBytes = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 8388608;
+      description = ''
+        Largest image a request state may carry, in bytes (sets
+        `LAYA_MAX_IMAGE_BYTES`). A bigger one is refused with 413 before it is
+        decoded. null leaves the server's own default (12 MB).
+      '';
+    };
+
+    maxImagePixels = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 4096000;
+      description = ''
+        Largest image the server will decode, in pixels (sets
+        `LAYA_MAX_IMAGE_PIXELS`). Checked against the PNG/JPEG/GIF/WebP header
+        first, so a small file declaring an enormous picture is refused without
+        a decoder ever running. null leaves the server's own default (4096x4096).
+      '';
+    };
+
+    allowImageUrls = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Fetch an `image_url` reference (sets `LAYA_ALLOW_IMAGE_URLS`). Off by
+        default on purpose: a server that fetches whatever URL a request names is
+        an SSRF primitive pointed at its own network. Only http and https are
+        fetched even when on, and a deployment that enables it should put its own
+        egress policy in front.
+      '';
+    };
+
     tournamentGroup = lib.mkOption {
       type = lib.types.nullOr (lib.types.ints.between 2 100);
       default = null;
@@ -411,6 +446,12 @@ in
         LAYA_MAX_TOKEN_BUDGET = toString cfg.maxTokenBudget;
       } // lib.optionalAttrs (cfg.maxBatchTokens != null) {
         LAYA_MAX_BATCH_TOKENS = toString cfg.maxBatchTokens;
+      } // lib.optionalAttrs (cfg.maxImageBytes != null) {
+        LAYA_MAX_IMAGE_BYTES = toString cfg.maxImageBytes;
+      } // lib.optionalAttrs (cfg.maxImagePixels != null) {
+        LAYA_MAX_IMAGE_PIXELS = toString cfg.maxImagePixels;
+      } // {
+        LAYA_ALLOW_IMAGE_URLS = if cfg.allowImageUrls then "1" else "0";
       } // lib.optionalAttrs (cfg.tournamentGroup != null) {
         LAYA_TOURNAMENT_GROUP = toString cfg.tournamentGroup;
       } // lib.optionalAttrs (cfg.revision != null) {

@@ -1025,8 +1025,7 @@ def _state_length_lower_bound_over(state: Any, cap: int) -> int:
 IMAGE_REQUEST_KEYS = ("image", "image_path", "image_url", "image_base64")
 
 
-def _image_limit(name: str, default: int) -> int:
-    raw = os.environ.get(name)
+def _image_limit(name: str, raw: Optional[str], default: int) -> int:
     if raw is None or not raw.strip():
         return default
     try:
@@ -1072,8 +1071,12 @@ def _resolve_image_state(state: Any) -> Any:
     try:
         data = _vision.read_image_bytes(
             spec,
-            max_bytes=_image_limit("LAYA_MAX_IMAGE_BYTES", _vision.MAX_IMAGE_BYTES),
-            max_pixels=_image_limit("LAYA_MAX_IMAGE_PIXELS", _vision.MAX_IMAGE_PIXELS),
+            max_bytes=_image_limit("LAYA_MAX_IMAGE_BYTES",
+                                   os.environ.get("LAYA_MAX_IMAGE_BYTES"),
+                                   _vision.MAX_IMAGE_BYTES),
+            max_pixels=_image_limit("LAYA_MAX_IMAGE_PIXELS",
+                                    os.environ.get("LAYA_MAX_IMAGE_PIXELS"),
+                                    _vision.MAX_IMAGE_PIXELS),
             allow_url=_image_urls_allowed())
     except _vision.ImageRefused as exc:
         raise HTTPException(
