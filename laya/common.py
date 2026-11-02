@@ -600,7 +600,7 @@ class DecisionModel(nn.Module):
     """Bidirectional transformer encoder backbone + typed decision head."""
 
     def __init__(self, encoder: nn.Module, head_layers: int = 2, n_act: int = 2, dropout: float = 0.1,
-                 no_init: bool = False):
+                 no_init: bool = False, cross_readout: bool = False):
         super().__init__()
         self.encoder = encoder
         d = encoder.config.hidden_size
@@ -620,19 +620,33 @@ class DecisionModel(nn.Module):
             self.head = nn.TransformerEncoder(layer, head_layers, enable_nested_tensor=False) if head_layers > 0 else None
             self.type_emb = nn.Embedding(3, d)
             self.scorer = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+            # An attention readout, for a checkpoint that must decide about an image with a frozen
+            # encoder. A shared linear scorer over a marker state can only read out a *linear*
+            # function of that state, so "does this option match the picture" has to be computed
+            # before the scorer -- and with a frozen encoder nothing computes it: the marker
+            # states of the four options come out nearly identical (measured: pairwise distance
+            # 0.005 on a random base), the scorer's activations for them are identical, and the
+            # gradient through a shared, sum-zero scorer cancels to nothing. Querying the visual
+            # tokens directly makes the option/image interaction a product the head can learn.
+            self.readout = None
+            if cross_readout:
+                nhead = max(1, d // 64)
+                self.readout = nn.MultiheadAttention(d, nhead, dropout=dropout, batch_first=True)
+                self.readout_norm = nn.LayerNorm(d)
             self.act_head = nn.Sequential(nn.Linear(d + 4, 256), nn.GELU(), nn.Linear(256, n_act))
             self.register_buffer("temperature", torch.ones(3))
         if no_init:
             # Only the modules created above are on the meta device; the encoder is already real
             # and may hold non-persistent buffers (RoPE frequencies) that to_empty would wipe.
-            for module in (self.head, self.type_emb, self.scorer, self.act_head):
+            for module in (self.head, self.type_emb, self.scorer, self.act_head, self.readout,
+                           getattr(self, "readout_norm", None)):
                 if module is not None:
                     module.to_empty(device="cpu")
             self.temperature = torch.empty_like(self.temperature, device="cpu")
         self.head_checkpointing = False
 
     def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder: bool = False,
-                position_ids=None, option_ids=None, inputs_embeds=None):
+                position_ids=None, option_ids=None, inputs_embeds=None, visual_mask=None):
         if inputs_embeds is not None and option_ids is not None:
             # The parallel layout builds its masks from `input_ids`-shaped positions and is not
             # wired for a vision checkpoint; refusing beats silently running the wrong masks.
@@ -667,6 +681,12 @@ class DecisionModel(nn.Module):
                     h = layer(h, src_key_padding_mask=pad)
         idx = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, h.size(-1))
         m = torch.gather(h, 1, idx)
+        if self.readout is not None and visual_mask is not None:
+            # Each option's marker state queries the visual tokens directly. `key_padding_mask`
+            # marks the *non*-visual positions, so an option attends to the picture and nothing
+            # else -- the interaction the scorer cannot compute for itself.
+            attended, _ = self.readout(m, h, h, key_padding_mask=~visual_mask.bool())
+            m = self.readout_norm(m + attended)
         logits = self.scorer(m).squeeze(-1).float()
         logits = logits.masked_fill(~marker_mask, -1e4)
 
@@ -739,18 +759,19 @@ def build_model(cfg: Dict, encoder_dir: Optional[str] = None, pretrained: bool =
     from transformers import AutoConfig, AutoModel
 
     head_layers, n_act = cfg.get("head_layers", 2), len(cfg.get("act_costs", {})) + 1
+    cross_readout = cfg.get("readout") == "cross_attention"
     if not pretrained or (encoder_dir and os.path.exists(encoder_dir)):
         ecfg = AutoConfig.from_pretrained(encoder_dir or cfg["encoder"])
         _apply_rope_config(ecfg)
         with _no_init_weights():
             enc = AutoModel.from_config(ecfg, attn_implementation="sdpa")
-        return DecisionModel(enc, head_layers, n_act, no_init=True)
+        return DecisionModel(enc, head_layers, n_act, no_init=True, cross_readout=cross_readout)
     # Training-time Hub load of the base encoder; allow pinning it like the checkpoints.
     kw = {"attn_implementation": "sdpa"}
     if revision:
         kw["revision"] = revision
     enc = AutoModel.from_pretrained(cfg["encoder"], **kw)
-    return DecisionModel(enc, head_layers, n_act)
+    return DecisionModel(enc, head_layers, n_act, cross_readout=cross_readout)
 
 
 def proper_reward(

@@ -1142,6 +1142,82 @@ def test_predict_long_refuses_when_the_block_leaves_no_window():
         raise AssertionError("a 500-token block in a 512 budget leaves no window and must be refused")
 
 
+# -- the attention readout (spec §5.1) -----------------------------------------------------
+
+def test_a_checkpoint_without_the_readout_is_unchanged():
+    """C6: the readout is opt-in, and a linear-scorer checkpoint keeps exactly its own graph."""
+    model = _tiny_model()
+    assert model.readout is None
+    assert not any(k.startswith("readout") for k in model.state_dict()), \
+        "a text checkpoint's state_dict must not grow vision parameters"
+
+
+def test_the_readout_only_runs_when_a_visual_mask_is_supplied():
+    from laya.vision import build_vision_encoder
+    from transformers import AutoConfig, AutoModel
+
+    cfg = AutoConfig.for_model("bert", hidden_size=16, num_hidden_layers=1, num_attention_heads=2,
+                               intermediate_size=32, vocab_size=50, pad_token_id=0)
+    model = DecisionModel(AutoModel.from_config(cfg), head_layers=1, n_act=2, cross_readout=True)
+    model.eval()
+    ids = torch.tensor([[5, 6, 7, 8, 9, 10]])
+    att = torch.ones_like(ids)
+    mpos = torch.tensor([[2, 4]])
+    mmask = torch.ones(1, 2, dtype=torch.bool)
+    qt = torch.tensor([0])
+
+    with torch.no_grad():
+        plain, _ = model.forward(input_ids=ids, attention_mask=att, marker_pos=mpos,
+                                 marker_mask=mmask, qtype=qt)
+        with_mask, _ = model.forward(input_ids=ids, attention_mask=att, marker_pos=mpos,
+                                     marker_mask=mmask, qtype=qt,
+                                     visual_mask=torch.zeros(1, 6, dtype=torch.bool))
+    assert tuple(plain.shape) == (1, 2) and tuple(with_mask.shape) == (1, 2)
+    assert not torch.allclose(plain, with_mask), "the readout must change the logits when it runs"
+
+
+def test_the_readout_reaches_the_answer_end_to_end():
+    """Through the real path: pixels -> tower -> projector -> sequence -> readout -> logits."""
+    from laya.train import encode_item, items_from_rows
+    from laya.vision import build_vision_encoder
+
+    model = _model_with_readout()
+    v = parse_vision({"vision": {"n_visual_tokens": 4, "summary_for_options_over": 0}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    tok = _stub_tokenizer()
+    items, _ = items_from_rows(tok, [{"state": {"image": {"pixels": torch.zeros(3, 32, 32)}},
+                                      "questions": {"q": {"type": "choice", "instructions": "p",
+                                                          "criteria": ["a", "b"]}},
+                                      "expected": {"q": "a"}}],
+                               max_len=512, head_max_len=192, vision=v,
+                               encode_visual=lambda px: enc.encode_patches(px.unsqueeze(0))[0].detach())
+    from laya.train import _project_visual, collate_training_batch
+    projected = _project_visual(items[0], enc.projector)
+    encoded = encode_item(tok, projected, 512, 192, vision=v, max_positions=512)
+    batch = collate_training_batch([encoded], tok.pad_token_id, embed_fn=_token_table(model))
+    assert "visual_mask" in batch and bool(batch["visual_mask"].any())
+    assert batch["visual_mask"].sum() == v.n_visual_tokens
+    with torch.no_grad():
+        logits, _ = model(None, batch["attention_mask"], batch["marker_pos"], batch["marker_mask"],
+                          batch["qtype"], position_ids=batch["position_ids"],
+                          inputs_embeds=batch["inputs_embeds"],
+                          visual_mask=batch["visual_mask"])
+    assert tuple(logits.shape) == (1, 2), logits.shape
+
+
+def _model_with_readout():
+    from transformers import AutoConfig, AutoModel
+    cfg = AutoConfig.for_model("bert", hidden_size=16, num_hidden_layers=1, num_attention_heads=2,
+                               intermediate_size=32, vocab_size=50, pad_token_id=0)
+    m = DecisionModel(AutoModel.from_config(cfg), head_layers=1, n_act=2, cross_readout=True)
+    return m.eval()
+
+
+def _token_table(model):
+    emb = model.encoder.embeddings
+    return getattr(emb, "tok_embeddings", None) or emb.word_embeddings
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -1202,6 +1278,9 @@ if __name__ == "__main__":
     test_transparency_composites_onto_white_not_black()
     test_palette_and_cmyk_convert_through_srgb()
     test_the_same_bytes_decode_identically()
+    test_a_checkpoint_without_the_readout_is_unchanged()
+    test_the_readout_only_runs_when_a_visual_mask_is_supplied()
+    test_the_readout_reaches_the_answer_end_to_end()
     test_a_bundled_tower_is_preferred_over_the_hub_id()
     test_an_unbundleable_tower_fails_loudly()
     test_a_long_scan_is_sized_against_the_visual_budget()

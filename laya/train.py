@@ -785,6 +785,10 @@ def _forward(model, batch, device, amp: bool, detach_encoder: bool):
         kwargs = {"detach_encoder": detach_encoder,
                   "position_ids": batch["position_ids"].to(device),
                   "inputs_embeds": batch["inputs_embeds"].to(device)}
+        if "visual_mask" in batch:
+            # Without it the readout silently never runs, and the head falls back to the shared
+            # linear scorer this checkpoint was configured to replace.
+            kwargs["visual_mask"] = batch["visual_mask"].to(device)
         if amp:
             with torch.autocast(device.type, dtype=torch.float16):
                 logits, _act = model(*args, **kwargs)

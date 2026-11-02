@@ -753,6 +753,9 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
     pos = torch.zeros(len(items), width, dtype=torch.long)
     mpos = torch.zeros(len(items), k_max, dtype=torch.long)
     mmask = torch.zeros(len(items), k_max, dtype=torch.bool)
+    # Which positions hold the visual block, for a checkpoint with an attention readout. The
+    # readout asks "which tokens are the picture", and nothing else in the batch says.
+    vmask = torch.zeros(len(items), width, dtype=torch.bool)
     # Training batches carry a target; inference batches do not. Mirrors `collate_items`, including
     # its refusal of a target longer than the row's own marker count.
     has_target = any("target" in it for it in items)
@@ -766,6 +769,7 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
         embeds[i, :n] = row
         att[i, :n] = 1
         pos[i, :n] = torch.tensor(it["plan"].position_ids, dtype=torch.long)
+        vmask[i, it["plan"].splice:it["plan"].splice + n_visual] = True
         k = len(it["markers"])
         mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long)
         mmask[i, :k] = True
@@ -783,6 +787,7 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
         "marker_pos": mpos,
         "marker_mask": mmask,
         "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long),
+        "visual_mask": vmask,
     }
     if target is not None:
         out["target"] = target

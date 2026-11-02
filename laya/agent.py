@@ -1475,6 +1475,7 @@ class Agent(HookRegistry):
                         b["qtype"].to(self.device),
                         position_ids=b["position_ids"].to(self.device),
                         inputs_embeds=b["inputs_embeds"].to(self.device),
+                        visual_mask=b["visual_mask"].to(self.device) if "visual_mask" in b else None,
                     )
                 else:
                     out = self.model(
