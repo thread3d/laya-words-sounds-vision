@@ -428,3 +428,118 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
+
+# ------------------------------------------------------------------------------------------------
+# Vision checkpoints: two graphs
+# ------------------------------------------------------------------------------------------------
+
+def export_vision_graphs(encoder, model, out_dir: str, opset_version: Optional[int] = None):
+    """Write `<out_dir>/tower.onnx` and `<out_dir>/decision.onnx` for a vision checkpoint.
+
+    Split where the pipeline is split: the tower runs once per image and its output is reused by
+    every question about that image, so fusing the two would re-run it per question -- the largest
+    avoidable cost in the serving path (spec §4.6).
+
+    Returns `(tower_path, decision_path)`. `encoder` is a `laya.vision.VisionEncoder`; `model` is
+    the `DecisionModel` it feeds.
+    """
+    from laya.vision_onnx import (DECISION_INPUT_NAMES, DECISION_OUTPUT_NAMES, VISION_INPUT_NAMES,
+                                  VISION_OUTPUT_NAMES, VisionDecisionExport, VisionEncoderExport,
+                                  example_decision_inputs, example_vision_inputs)
+
+    if opset_version is None:
+        opset_version = default_opset_version()
+    os.makedirs(out_dir, exist_ok=True)
+
+    tower_path = os.path.join(out_dir, "tower.onnx")
+    decision_path = os.path.join(out_dir, "decision.onnx")
+
+    hidden = model.encoder.config.hidden_size
+    n_visual = int(encoder.config.n_visual_tokens)
+
+    torch.onnx.export(
+        VisionEncoderExport(encoder).as_module(),
+        (example_vision_inputs(encoder.config),),
+        tower_path,
+        export_params=True,
+        opset_version=opset_version,
+        do_constant_folding=True,
+        input_names=VISION_INPUT_NAMES,
+        output_names=VISION_OUTPUT_NAMES,
+        dynamic_axes={"pixel_values": {0: "batch_size"},
+                      "visual_embeds": {0: "batch_size"}},
+    )
+    torch.onnx.export(
+        VisionDecisionExport(model).as_module(),
+        example_decision_inputs(hidden, n_visual=n_visual),
+        decision_path,
+        export_params=True,
+        opset_version=opset_version,
+        do_constant_folding=True,
+        input_names=DECISION_INPUT_NAMES,
+        output_names=DECISION_OUTPUT_NAMES,
+        dynamic_axes={"inputs_embeds": {0: "batch_size", 1: "seq_len"},
+                      "attention_mask": {0: "batch_size", 1: "seq_len"},
+                      "position_ids": {0: "batch_size", 1: "seq_len"},
+                      "marker_pos": {0: "batch_size", 1: "num_markers"},
+                      "marker_mask": {0: "batch_size", 1: "num_markers"},
+                      "qtype": {0: "batch_size"},
+                      "logits": {0: "batch_size", 1: "num_markers"},
+                      "act_logits": {0: "batch_size"}},
+    )
+    return tower_path, decision_path
+
+
+def verify_vision_graphs(encoder, model, tower_path: str, decision_path: str,
+                          atol: float = 1e-4) -> None:
+    """Feed both graphs and compare them against the eager modules, batch 1 and 2.
+
+    A graph that loads is not a graph that agrees. Two things this catches that a load check
+    cannot: a dynamic-axis declaration that silently went static (row 2 of a batch-2 feed fails),
+    and a wrapper whose signature drifted from the name table.
+    """
+    import numpy as np
+
+    from laya.vision_onnx import (DECISION_INPUT_NAMES, DECISION_OUTPUT_NAMES, VISION_INPUT_NAMES,
+                                  VISION_OUTPUT_NAMES, VisionDecisionExport, VisionEncoderExport,
+                                  check_names, example_decision_inputs, example_vision_inputs)
+
+    import onnxruntime as ort
+
+    tower_session = ort.InferenceSession(tower_path, providers=["CPUExecutionProvider"])
+    decision_session = ort.InferenceSession(decision_path, providers=["CPUExecutionProvider"])
+    check_names(tower_session, VISION_INPUT_NAMES, VISION_OUTPUT_NAMES, "tower graph")
+    check_names(decision_session, DECISION_INPUT_NAMES, DECISION_OUTPUT_NAMES, "decision graph")
+
+    tower_module = VisionEncoderExport(encoder).as_module().eval()
+    decision_module = VisionDecisionExport(model).as_module().eval()
+    hidden = model.encoder.config.hidden_size
+
+    for batch in (1, 2):
+        pixels = example_vision_inputs(encoder.config, batch=batch)
+        with torch.no_grad():
+            want_visual = tower_module(pixels).numpy()
+        got_visual = tower_session.run(["visual_embeds"], {"pixel_values": pixels.numpy()})[0]
+        if got_visual.shape != want_visual.shape:
+            raise ValueError("tower graph returned %s for a batch-%d feed; torch gives %s"
+                             % (got_visual.shape, batch, want_visual.shape))
+        if not np.allclose(got_visual, want_visual, atol=atol):
+            worst = float(np.abs(got_visual - want_visual).max())
+            raise ValueError("tower graph disagrees with torch on batch %d: max |diff| = %g"
+                             % (batch, worst))
+
+        feed = example_decision_inputs(hidden, n_visual=encoder.config.n_visual_tokens, batch=batch)
+        with torch.no_grad():
+            want_logits, want_act = decision_module(*feed)
+        got_logits, got_act = decision_session.run(
+            ["logits", "act_logits"], {name: tensor.numpy() for name, tensor in zip(
+                DECISION_INPUT_NAMES, feed)})
+        for name, got, want in (("logits", got_logits, want_logits.numpy()),
+                                ("act_logits", got_act, want_act.numpy())):
+            if got.shape != want.shape:
+                raise ValueError("decision graph returned %s for %s on batch %d; torch gives %s"
+                                 % (got.shape, name, batch, want.shape))
+            if not np.allclose(got, want, atol=atol):
+                raise ValueError("decision graph disagrees with torch on %s, batch %d: max |diff| "
+                                 "= %g" % (name, batch, float(np.abs(got - want).max())))
