@@ -253,3 +253,193 @@ def describe_plan(plan: VisualPlan) -> Tuple[str, ...]:
     return ("splice at token %d" % plan.splice,
             "%d visual tokens%s" % (plan.n_visual, " (with summary)" if plan.summary else ""),
             "sequence length %d" % plan.length)
+
+
+# ------------------------------------------------------------------------------------------------
+# The tower and the projector
+# ------------------------------------------------------------------------------------------------
+
+def _torch():
+    """Import torch here, not at module import.
+
+    `import laya.vision` has to stay cheap for the text path: the router and `laya.serve` must not
+    pull torch in (`tests/test_lazy_import.py`), and a text-only deployment should never pay for a
+    module it does not use.
+    """
+    import torch
+    return torch
+
+
+class PooledProjector:
+    """Compress the tower's patch tokens and project them into the encoder's width.
+
+    Two operations, in this order:
+
+    * **pool** -- ``adaptive_avg`` folds the patch grid down to ``n_visual_tokens`` positions
+      (the documented baseline; a learned coarse-to-fine connector replaces this later behind the
+      same interface). ``none`` passes the patches through untouched.
+    * **project** -- a linear map into the text encoder's hidden size, plus a learned visual
+      *type* vector.
+
+    The type vector lives here rather than on ``DecisionModel`` on purpose. A new parameter on the
+    decision model would break `load_state_dict(..., strict=True)` for every existing checkpoint;
+    putting it in the projector keeps text checkpoints byte-identical and puts the "this is a
+    patch, not a word" signal exactly where the patches are produced. It is added *after* the
+    linear so it cannot be confused with a bias on a constant row.
+    """
+
+    def __init__(self, tower_dim: int, hidden_size: int, n_visual_tokens: int,
+                 pooling: str = "adaptive_avg", dtype=None):
+        torch = _torch()
+        self.n_visual_tokens = n_visual_tokens
+        self.pooling = pooling
+        self.proj = torch.nn.Linear(tower_dim, hidden_size)
+        self.type_vector = torch.nn.Parameter(torch.zeros(hidden_size))
+        if dtype is not None:
+            self.proj = self.proj.to(dtype)
+            self.type_vector.data = self.type_vector.data.to(dtype)
+
+    def parameters(self):
+        return [self.proj.weight, self.proj.bias, self.type_vector]
+
+    def to(self, device):
+        self.proj = self.proj.to(device)
+        self.type_vector.data = self.type_vector.data.to(device)
+        return self
+
+    def __call__(self, patches):
+        return self.forward(patches)
+
+    def forward(self, patches):
+        """`patches` ``[B, N, C]`` -> ``[B, n_visual_tokens, hidden]``."""
+        torch = _torch()
+        x = patches
+        if self.pooling == "adaptive_avg":
+            x = torch.nn.functional.adaptive_avg_pool1d(x.transpose(1, 2), self.n_visual_tokens)
+            x = x.transpose(1, 2)
+        elif self.pooling != "none":
+            raise ValueError("unknown pooling %r" % (self.pooling,))
+        return self.proj(x) + self.type_vector
+
+
+class VisionEncoder:
+    """A frozen vision tower plus the projector, producing the visual block.
+
+    The tower is **injected**, not loaded here, so this class is testable with a stub and so the
+    caller decides what to download. :func:`load_tower` is the convenience that builds the real
+    one, and it is the only place that imports a vision architecture.
+    """
+
+    def __init__(self, tower, projector: PooledProjector, config: VisionConfig):
+        self.tower = tower
+        self.projector = projector
+        self.config = config
+
+    def train(self, mode: bool = True):
+        self.tower.train(mode) if mode else self.tower.eval()
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def encode(self, pixel_values):
+        """``[B, 3, H, W]`` pixels -> ``[B, n_visual_tokens, hidden]`` visual embeddings."""
+        torch = _torch()
+        with torch.no_grad() if not self._tower_trains() else _nullcontext():
+            out = self.tower(pixel_values=pixel_values)
+        patches = getattr(out, "last_hidden_state", None)
+        if patches is None:
+            raise TypeError("the vision tower must return `last_hidden_state` patch tokens; "
+                            "got %s" % type(out).__name__)
+        return self.projector(patches)
+
+    def _tower_trains(self) -> bool:
+        for p in self.tower.parameters():
+            if getattr(p, "requires_grad", False):
+                return True
+        return False
+
+
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
+def load_tower(model_id: str, revision: Optional[str] = None, keep_layers: Optional[int] = None,
+               dtype=None, trust_remote_code: bool = False):
+    """Build the frozen vision tower. The only import of a vision architecture in the package.
+
+    `keep_layers` reads the patch tokens `keep_layers` blocks early. Two independent groups found
+    the last blocks of a vision tower produce *worse* features than intermediate ones (Meta PE
+    measures -14.0 DAVIS J&F from its best layer to its last; InternVL 1.5 took the fourth-to-last
+    layer and dropped three blocks), so this is a free latency saving that the prior says is also a
+    free accuracy win. It is a config key, not a code change, so it can be swept.
+    """
+    from transformers import SiglipVisionModel
+
+    kw = {}
+    if revision:
+        kw["revision"] = revision
+    if dtype is not None:
+        kw["torch_dtype"] = dtype
+    if trust_remote_code:
+        kw["trust_remote_code"] = True
+    tower = SiglipVisionModel.from_pretrained(model_id, **kw)
+    for p in tower.parameters():
+        p.requires_grad_(False)
+    tower.eval()
+    if keep_layers:
+        _truncate_tower(tower, keep_layers)
+    return tower
+
+
+def _truncate_tower(tower, keep_layers: int):
+    """Keep only the first `keep_layers` blocks of the tower's encoder."""
+    vision_model = getattr(tower, "vision_model", tower)
+    enc = getattr(vision_model, "encoder", None)
+    layers = getattr(enc, "layers", None)
+    if layers is None:
+        raise TypeError("keep_layers=%d was requested but this tower has no `.encoder.layers` to "
+                        "truncate" % keep_layers)
+    if not 1 <= keep_layers <= len(layers):
+        raise ValueError("keep_layers=%d is out of range for a %d-block tower"
+                         % (keep_layers, len(layers)))
+    enc.layers = layers[:keep_layers]
+    return tower
+
+
+def build_vision_encoder(config: VisionConfig, hidden_size: int, tower=None, dtype=None):
+    """Assemble a :class:`VisionEncoder` for `config`.
+
+    `tower` is injected when the caller already has one (tests, or a shared tower across
+    checkpoints); otherwise it is loaded from `config.tower`.
+    """
+    torch = _torch()
+    if tower is None:
+        tower = load_tower(config.tower, revision=config.tower_revision,
+                           keep_layers=config.keep_layers, dtype=dtype)
+    tower_dim = _tower_width(tower)
+    projector = PooledProjector(tower_dim, hidden_size, config.n_visual_tokens,
+                                pooling=config.pooling, dtype=dtype)
+    return VisionEncoder(tower, projector, config)
+
+
+def _tower_width(tower) -> int:
+    cfg = getattr(tower, "config", None)
+    for attr in ("hidden_size", "projection_dim"):
+        val = getattr(cfg, attr, None)
+        if isinstance(val, int):
+            return val
+    vision_cfg = getattr(cfg, "vision_config", None)
+    val = getattr(vision_cfg, "hidden_size", None)
+    if isinstance(val, int):
+        return val
+    raise TypeError("cannot determine the tower's patch width from %s" % type(cfg).__name__)
+
+
+def tower_parameters(encoder: VisionEncoder):
+    """The trainable parameters of a vision encoder (the tower stays frozen by default)."""
+    return encoder.projector.parameters()

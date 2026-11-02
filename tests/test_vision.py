@@ -15,8 +15,8 @@ from transformers import AutoConfig, AutoModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from laya.common import DecisionModel
-from laya.vision import (VisionConfig, assemble_inputs_embeds, parse_vision,
-                         visual_plan)
+from laya.vision import (PooledProjector, VisionConfig, assemble_inputs_embeds,
+                         build_vision_encoder, parse_vision, visual_plan)
 
 
 # -- config ---------------------------------------------------------------------------------
@@ -325,6 +325,150 @@ def _p(splice, n_visual):
                       position_ids=[], length=splice + n_visual)
 
 
+# -- tower + projector ----------------------------------------------------------------------
+
+class _StubTower:
+    """A stand-in for SigLIP2: [B, 3, H, W] -> last_hidden_state [B, N, C].
+
+    Injected rather than downloaded so these tests stay weight-free and offline, which is also why
+    `VisionEncoder` takes a tower instead of building one.
+    """
+
+    class config:
+        hidden_size = 32
+
+    def __init__(self, n_patches=196):
+        self.n_patches = n_patches
+        self.trained = True
+        self.seen = []
+
+    def parameters(self):
+        return []
+
+    def __call__(self, pixel_values):
+        self.seen.append(tuple(pixel_values.shape))
+        b = pixel_values.size(0)
+        patches = torch.arange(b * self.n_patches * 32, dtype=pixel_values.dtype).reshape(
+            b, self.n_patches, 32) / 1000.0
+        return type("Out", (), {"last_hidden_state": patches})()
+
+    def train(self, mode=True):
+        self.trained = mode
+
+    def eval(self):
+        self.trained = False
+
+
+def test_projector_compresses_and_projects():
+    proj = PooledProjector(32, 16, 8, pooling="adaptive_avg")
+    out = proj(torch.randn(2, 196, 32))
+    assert tuple(out.shape) == (2, 8, 16), out.shape
+
+
+def test_projector_passthrough_keeps_every_patch():
+    proj = PooledProjector(32, 16, 196, pooling="none")
+    out = proj(torch.randn(1, 196, 32))
+    assert tuple(out.shape) == (1, 196, 16), out.shape
+
+
+def test_projector_emits_a_varied_pattern_not_a_constant():
+    """LayerNorm removes a constant row, so a projector must not collapse to one."""
+    proj = PooledProjector(32, 16, 8, pooling="adaptive_avg")
+    out = proj(torch.randn(1, 196, 32))
+    assert out[0].std(dim=-1).min().item() > 1e-6, "rows collapsed to a constant"
+    assert not torch.allclose(out[0, 0], out[0, 1]), "visual tokens are indistinguishable"
+
+
+def test_type_vector_is_learnable_and_applied_after_the_linear():
+    proj = PooledProjector(32, 16, 4, pooling="adaptive_avg")
+    assert any(p is proj.type_vector for p in proj.parameters())
+    with torch.no_grad():
+        before = proj(torch.zeros(1, 32, 32))
+        proj.type_vector.add_(1.0)
+        after = proj(torch.zeros(1, 32, 32))
+    assert torch.allclose(after - before, torch.ones(1, 4, 16)), "type vector not applied"
+
+
+def test_encoder_produces_the_plan_sized_block():
+    v = parse_vision({"vision": {"n_visual_tokens": 8}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    out = enc.encode(torch.zeros(2, 3, 224, 224))
+    assert tuple(out.shape) == (2, 8, 16), out.shape
+    assert enc.tower.seen[-1] == (2, 3, 224, 224), enc.tower.seen
+
+
+def test_encoder_gradient_reaches_the_projector_not_the_tower():
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    out = enc.encode(torch.zeros(1, 3, 224, 224))
+    out.sum().backward()
+    assert enc.projector.proj.weight.grad is not None
+    assert enc.projector.proj.weight.grad.abs().sum().item() > 0
+
+
+def test_encoder_train_eval_toggles_the_tower():
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
+    enc.eval()
+    assert enc.tower.trained is False
+    enc.train(True)
+    assert enc.tower.trained is True
+
+
+def test_truncating_a_tower_validates_the_layer_count():
+    import torch.nn as nn
+    from laya.vision import _truncate_tower
+
+    class _Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(2, 2)
+
+    class _Enc(nn.Module):
+        def __init__(self, n):
+            super().__init__()
+            self.layers = nn.ModuleList([_Layer() for _ in range(n)])
+
+    class _Tower(nn.Module):
+        def __init__(self, n):
+            super().__init__()
+            self.vision_model = nn.Module()
+            self.vision_model.encoder = _Enc(n)
+
+    t = _Tower(6)
+    _truncate_tower(t, 4)
+    assert len(t.vision_model.encoder.layers) == 4
+    for bad in (0, 7):
+        try:
+            _truncate_tower(_Tower(6), bad)
+        except ValueError as e:
+            assert "out of range" in str(e), e
+            continue
+        raise AssertionError("keep_layers=%d should have been refused" % bad)
+
+
+def test_a_vision_encoder_feeds_the_decision_model_end_to_end():
+    """The whole path on a tiny model: pixels -> tower -> projector -> sequence -> option logits."""
+    model = _tiny_model()
+    v = parse_vision({"vision": {"n_visual_tokens": 4, "summary_for_options_over": 0}})
+    enc = build_vision_encoder(v, hidden_size=model.encoder.config.hidden_size, tower=_StubTower())
+    ids = torch.tensor([[5, 6, 7, 8, 9, 10, 11, 12]])
+    head_len = 6
+    plan = visual_plan(v, text_len=ids.size(1), markers=[2, 4], head_len=head_len, max_len=512,
+                       max_position_embeddings=512, option_tokens=6)
+    tok_emb = _raw_token_embeddings(model, ids)
+    vis = enc.encode(torch.zeros(1, 3, 224, 224))
+    emb = assemble_inputs_embeds(tok_emb, vis, plan)
+    att = torch.ones(1, plan.length)
+    with torch.no_grad():
+        logits, _ = model.forward(input_ids=None, attention_mask=att,
+                                  marker_pos=torch.tensor([plan.marker_positions]),
+                                  marker_mask=torch.ones(1, 2, dtype=torch.bool),
+                                  qtype=torch.tensor([0]), inputs_embeds=emb,
+                                  position_ids=torch.tensor([plan.position_ids]))
+    assert tuple(logits.shape) == (1, 2), logits.shape
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -347,4 +491,13 @@ if __name__ == "__main__":
     test_post_norm_embeddings_do_not_reproduce_the_input_ids_path()
     test_parallel_layout_refuses_inputs_embeds()
     test_a_spliced_visual_block_changes_the_option_logits()
+    test_projector_compresses_and_projects()
+    test_projector_passthrough_keeps_every_patch()
+    test_projector_emits_a_varied_pattern_not_a_constant()
+    test_type_vector_is_learnable_and_applied_after_the_linear()
+    test_encoder_produces_the_plan_sized_block()
+    test_encoder_gradient_reaches_the_projector_not_the_tower()
+    test_encoder_train_eval_toggles_the_tower()
+    test_truncating_a_tower_validates_the_layer_count()
+    test_a_vision_encoder_feeds_the_decision_model_end_to_end()
     print("all vision foundation tests passed")
