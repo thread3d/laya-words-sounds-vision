@@ -107,6 +107,11 @@ class TrainConfig:
     w_rps: float = 1.0
     shuffle_options: Tuple[str, ...] = ()
     modality_dropout: float = 0.0
+    # The checkpoint's `"vision"` block. `None` trains the checkpoint exactly as it is (a text
+    # checkpoint, or one that already carries a block); a mapping *adds* the block to a text
+    # checkpoint, which is the only way a vision checkpoint can come into existence -- the base
+    # checkpoints ship without one.
+    vision: Optional[Dict[str, Any]] = None
     option_layout: Optional[str] = None
     freeze_encoder: bool = False
     calib_max: int = 400
@@ -142,6 +147,13 @@ class TrainConfig:
         return "soft-ce" if has_vision else "rlcd"
 
     def validate(self) -> None:
+        if self.vision is not None:
+            if not isinstance(self.vision, dict):
+                raise ValueError("vision must be a mapping or None, got %r" % (self.vision,))
+            from .vision import parse_vision
+            # Parsed here so a typo in a key fails at argument parsing rather than after the
+            # checkpoint has loaded and the dataset has been read.
+            parse_vision({"vision": dict(self.vision)})
         if self.modality_dropout:
             if isinstance(self.modality_dropout, bool) or not (0.0 <= self.modality_dropout < 1.0):
                 raise ValueError("modality_dropout must be in [0, 1), got %r"
@@ -406,7 +418,8 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                 item, reason = make_item(tok, q, target, state_ids, head_max_len, max_len)
             if reason is None:
                 if visual is not None:
-                    item["visual"] = visual
+                    # Patches, projected later inside the training step (see `_visual_encoder_fn`).
+                    item["visual_patches"] = visual
                 items.append(item)
             else:
                 skipped[reason] = skipped.get(reason, 0) + 1
@@ -723,11 +736,28 @@ def _embedding_lookup(model):
 
 
 def _visual_encoder_fn(encoder):
-    """`pixels [3, H, W]` -> `[n_visual, hidden]`, matching the inference path exactly."""
+    """`pixels [3, H, W]` -> the tower's **patch tokens** `[N, tower_dim]`.
+
+    Patches, not the projected block, and that is the whole point. The tower is frozen, so its
+    output is a constant per image and caching it is honest. The projector is *trained*, so
+    projecting here -- once, before the loop, under `no_grad` -- would leave it out of the graph
+    and the checkpoint would ship a projector that had never learned anything. `_project_visual`
+    runs it inside the step instead.
+    """
     def encode(pixels):
         with torch.no_grad():
-            return encoder.encode(pixels.unsqueeze(0))[0]
+            return encoder.encode_patches(pixels.unsqueeze(0))[0]
     return encode
+
+
+def _project_visual(item, projector):
+    """Run the trainable projector over a cached patch buffer, inside the graph."""
+    patches = item.get("visual_patches")
+    if patches is None:
+        return item
+    projected = dict(item)
+    projected["visual"] = projector(patches.unsqueeze(0))[0]
+    return projected
 
 
 def collate_training_batch(chunk: Sequence[Dict[str, Any]], pad_id: int, embed_fn=None):
@@ -802,8 +832,26 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
         # A frozen encoder is a fixed feature extractor: dropout in it would only add noise.
         model.encoder.eval()
 
+    # The projector lives beside the model, not in it (DecisionModel carries no vision parameters
+    # on purpose, so existing checkpoints keep loading), which means `model.parameters()` does not
+    # see it. Without this list it would never be optimised and the checkpoint would ship a
+    # projector that had never learned anything.
+    # NOT `vision`: that name is the parsed VisionConfig this function was called with, and
+    # rebinding it here silently turned every downstream `vision.n_visual_tokens` into an
+    # AttributeError on the encoder -- in the real `finetune` path only, because the tests build a
+    # model without a `vision_encoder` attribute.
+    vision_encoder = getattr(model, "vision_encoder", None)
+    projector = None
+    if vision_encoder is not None:
+        projector = vision_encoder.projector
+        projector.to(device)
+        for parameter in projector.parameters():
+            parameter.requires_grad_(True)
     groups = [{"params": [p for n, p in model.named_parameters()
                           if not n.startswith("encoder.") and p.requires_grad], "lr": config.head_lr}]
+    if projector is not None:
+        groups.append({"params": [p for p in projector.parameters() if p.requires_grad],
+                       "lr": config.head_lr})
     if not config.freeze_encoder:
         groups.insert(0, {"params": [p for n, p in model.named_parameters()
                                      if n.startswith("encoder.") and p.requires_grad], "lr": config.encoder_lr})
@@ -831,15 +879,25 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
             # same item is not dropped on every epoch. Dropping is per *item*: the target stays
             # the true answer, which is what teaches the model that the text alone is sometimes
             # all it gets -- and, on the image-required items, that it is not enough.
-            chunk = [encode_item(tok, it, max_len, head_max_len,
-                                 draw_option_order(it, order_rng, config.shuffle_options), parallel,
-                                 vision=vision, max_positions=max_positions,
-                                 drop_visual=bool(vision is not None and config.modality_dropout
-                                                  and order_rng.random() < config.modality_dropout))
-                     for it in window]
+            chunk = []
+            for it in window:
+                dropped = bool(vision is not None and config.modality_dropout
+                               and order_rng.random() < config.modality_dropout)
+                source = it if (dropped or projector is None) else _project_visual(it, projector)
+                chunk.append(encode_item(tok, source, max_len, head_max_len,
+                                         draw_option_order(it, order_rng, config.shuffle_options),
+                                         parallel, vision=vision, max_positions=max_positions,
+                                         drop_visual=dropped))
             batch = collate_training_batch(chunk, tok.pad_token_id,
                                            embed_fn=embed_fn if vision is not None else None)
-            logits = _forward(model, batch, device, amp, config.freeze_encoder)
+            # `detach_encoder` severs the gradient at the encoder's output. For a text checkpoint
+            # that is free: nothing upstream of the encoder has parameters. For a vision one it is
+            # not -- the projector sits *upstream*, spliced into the encoder's input embeddings --
+            # so detaching makes it untrainable, and a frozen-encoder vision run would fit the head
+            # against a projector that never moved. Keep the graph when there is something to
+            # train through it, and pay the activation memory the detach existed to save.
+            logits = _forward(model, batch, device, amp,
+                              config.freeze_encoder and projector is None)
             mask = batch["marker_mask"].to(device)
             target = batch["target"].to(device)
             if config.loss == "rlcd":
@@ -1143,6 +1201,12 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     config.validate()
     dev = resolve_device(device)
     model, tok, cfg = load_checkpoint(model_dir)
+    if config.vision is not None:
+        # Declaring vision support is what turns a text checkpoint into a vision one. It has to
+        # happen before `parse_vision` below and before any checkpoint is saved, so the block
+        # travels with the weights.
+        cfg = dict(cfg, vision=dict(config.vision))
+        print("vision: training with a %r block" % (config.vision,), flush=True)
     # The base checkpoint is scored on eval_items before train_model runs, and calibration_records
     # sends its inputs to `dev`, so the weights have to be there first (CUDA and MPS crash otherwise).
     model.to(dev)

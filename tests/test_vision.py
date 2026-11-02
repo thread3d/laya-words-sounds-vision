@@ -124,15 +124,34 @@ def test_summary_token_shifts_markers_and_sits_before_the_first_option():
     assert p.splice == 8, p.splice
 
 
-def test_position_ids_keep_text_monotone_and_visual_reserved():
+def test_the_default_position_policy_keeps_the_block_adjacent():
+    """RoPE encodes distance, so "sequence-adjacent" only helps if the positions are adjacent too.
+
+    The contiguous policy numbers the block where the head ended and shifts the text after it, so
+    every relative offset stays small and the 128-token local windows reach the block.
+    """
     v = _plan()
     p = visual_plan(v, text_len=20, markers=[3, 5], head_len=7, max_len=512,
                     option_tokens=4, max_position_embeddings=8192)
+    assert v.position_policy == "contiguous"
     assert len(p.position_ids) == 28
-    text_pos = p.position_ids[:7] + p.position_ids[7 + 8:]
-    assert text_pos == list(range(20)), "text keeps its own monotone numbering"
     vis_pos = p.position_ids[7:7 + 8]
-    assert vis_pos == list(range(8192 - 8, 8192)), vis_pos
+    assert vis_pos == list(range(7, 15)), vis_pos
+    # text after the splice shifts by the block's width; text before it is untouched
+    assert p.position_ids[:7] == list(range(7))
+    # the 13 text tokens after the splice were 7..19 and shift by 8
+    assert p.position_ids[15:] == list(range(15, 28)), p.position_ids[15:]
+    # and the gap between the last marker and the block's first token is small, not thousands
+    assert min(vis_pos) - max(p.marker_positions) < 10
+
+
+def test_the_reserved_policy_is_still_available_and_is_far_away():
+    """Kept, and kept documented as the losing option: it measures 0.708 on the marker probe."""
+    v = _plan(position_policy="reserved")
+    p = visual_plan(v, text_len=20, markers=[3, 5], head_len=7, max_len=512,
+                    option_tokens=4, max_position_embeddings=8192)
+    assert p.position_ids[7:7 + 8] == list(range(8192 - 8, 8192))
+    assert min(p.position_ids[7:15]) - max(p.marker_positions) > 8000
 
 
 def test_budget_overflow_is_refused_with_the_arithmetic():
@@ -1135,7 +1154,8 @@ if __name__ == "__main__":
     test_explicit_offset_is_honoured_and_bounds_checked()
     test_block_lands_after_the_head_and_markers_do_not_move()
     test_summary_token_shifts_markers_and_sits_before_the_first_option()
-    test_position_ids_keep_text_monotone_and_visual_reserved()
+    test_the_default_position_policy_keeps_the_block_adjacent()
+    test_the_reserved_policy_is_still_available_and_is_far_away()
     test_budget_overflow_is_refused_with_the_arithmetic()
     test_head_len_cannot_exceed_the_sequence()
     test_assembly_splices_visual_rows_at_the_splice_point()

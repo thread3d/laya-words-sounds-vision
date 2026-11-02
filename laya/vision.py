@@ -60,7 +60,8 @@ VISION_DEFAULTS: Dict[str, Any] = {
     "n_visual_tokens": 64,
     "pooling": "adaptive_avg",
     "slot": "after_options",
-    "position_offset": None,     # None -> reserved block at the top of the positional budget
+    "position_policy": "contiguous",   # "contiguous" | "reserved"
+    "position_offset": None,     # only for "reserved": where the block starts (None -> the top)
     "keep_layers": None,         # None -> the tower's last block; N -> read N blocks early
     "summary_for_options_over": 96,   # rendered option tokens that trigger a [VIS_SUMMARY] token
     "pixel_mean": 0.5,          # SigLIP's processor rescales 1/255 then normalises by 0.5/0.5
@@ -108,6 +109,9 @@ class VisionConfig:
         if self.keep_layers is not None and (not isinstance(self.keep_layers, int) or self.keep_layers < 1):
             raise ValueError("vision.keep_layers must be None or a positive int, got %r"
                              % (self.keep_layers,))
+        if self.position_policy not in ("contiguous", "reserved"):
+            raise ValueError("vision.position_policy must be 'contiguous' or 'reserved', got %r"
+                             % (self.position_policy,))
         if self.position_offset is not None:
             if not isinstance(self.position_offset, int) or self.position_offset < 0:
                 raise ValueError("vision.position_offset must be None or a non-negative int, got %r"
@@ -120,12 +124,18 @@ class VisionConfig:
                     % (self.n_visual_tokens, self.position_offset, max_position_embeddings))
 
     # -- helpers ---------------------------------------------------------------------------
-    def position_ids_for_visual(self, max_position_embeddings: int) -> List[int]:
-        """The reserved positions the visual block occupies.
+    def position_ids_for_visual(self, max_position_embeddings: int,
+                                start: Optional[int] = None) -> List[int]:
+        """The positions the visual block occupies, for the `reserved` policy.
 
-        The default block is the top of the positional budget rather than the bottom: text keeps
-        positions from 0, so a block at the top cannot collide with any text position the caller
-        can still add, however long the state grows.
+        `start` is the block's first position; `None` reserves the top of the positional budget.
+
+        **This policy loses to `contiguous` on this encoder, and the measurement is the reason the
+        default is what it is.** The block is *sequence*-adjacent to the option markers, but a
+        reserved block puts it ~8000 positions away in RoPE terms -- outside the 128-token local
+        window of 18 of ModernBERT's 28 layers and far outside the range the checkpoint was trained
+        on. A frozen-feature probe on a trained checkpoint put the colour signal at 0.708 on the
+        marker states with this policy; the same probe is the check for whatever replaces it.
         """
         start = self.position_offset
         if start is None:
@@ -214,16 +224,24 @@ def visual_plan(vision: VisionConfig, text_len: int, markers: Sequence[int], hea
             "vision.n_visual_tokens, shorten the state, or raise max_len for this checkpoint."
             % (text_len, n_visual, length, max_len))
 
-    text_positions = list(range(text_len))
-    visual_positions = vision.position_ids_for_visual(max_position_embeddings)
-    if summary:
-        # The summary token is a visual token, so it needs a visual position too; take the one
-        # after the reserved block so the real patch slots keep their numbering.
-        visual_positions = visual_positions + [visual_positions[-1] + 1]
-
-    marker_positions = [m + (1 if summary else 0) for m in markers]
     splice = head_len + (1 if summary else 0)
-    position_ids = text_positions[:head_len] + visual_positions + text_positions[head_len:]
+    marker_positions = [m + (1 if summary else 0) for m in markers]
+
+    if vision.position_policy == "contiguous":
+        # The block continues the numbering where the head left off, and the text after it shifts
+        # by the block's width. RoPE encodes *distance*, so this is what actually makes the block
+        # adjacent to the option markers: the offsets are small, the 128-token local windows reach
+        # it, and every relative distance stays inside the range the checkpoint was trained on.
+        visual_positions = list(range(head_len, head_len + n_visual))
+        after = [p + n_visual for p in range(head_len, text_len)]
+        position_ids = list(range(head_len)) + visual_positions + after
+    else:
+        text_positions = list(range(text_len))
+        visual_positions = vision.position_ids_for_visual(
+            max_position_embeddings, start=splice if vision.position_offset is None else None)
+        if summary:
+            visual_positions = visual_positions + [visual_positions[-1] + 1]
+        position_ids = text_positions[:head_len] + visual_positions + text_positions[head_len:]
     return VisualPlan(splice=splice, n_visual=n_visual, summary=summary,
                       marker_positions=marker_positions, position_ids=position_ids,
                       length=length)
@@ -353,6 +371,24 @@ class VisionEncoder:
 
     def eval(self):
         return self.train(False)
+
+    def encode_patches(self, pixel_values):
+        """``[B, 3, H, W]`` -> the tower's patch tokens ``[B, N, C]``, unprojected.
+
+        The split that makes training possible: the tower is frozen, so its output can be computed
+        once per image and cached; the projector is *trained*, so it has to run inside the step
+        where autograd can see it. `encode` is the two steps together, which is what inference
+        wants.
+        """
+        torch = _torch()
+        normalised = (pixel_values - self.config.pixel_mean) / self.config.pixel_std
+        with torch.no_grad() if not self._tower_trains() else _nullcontext():
+            out = self.tower(pixel_values=normalised)
+        patches = getattr(out, "last_hidden_state", None)
+        if patches is None:
+            raise TypeError("the vision tower must return `last_hidden_state` patch tokens; "
+                            "got %s" % type(out).__name__)
+        return patches
 
     def encode(self, pixel_values):
         """``[B, 3, H, W]`` pixels in [0, 1] -> ``[B, n_visual_tokens, hidden]`` embeddings.

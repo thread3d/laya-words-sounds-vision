@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from typing import Optional, Sequence
 
@@ -161,6 +162,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override maximum question head token budget.",
     )
     parser.add_argument(
+        "--vision",
+        nargs="?",
+        const="{}",
+        default=None,
+        metavar="JSON",
+        help="Train this checkpoint with vision support by adding a \"vision\" block to its "
+             "config. With no value, the defaults apply (SigLIP2 base/16, 64 visual tokens); pass "
+             "a JSON object to override, e.g. --vision '{\"n_visual_tokens\": 16}'. This is the "
+             "only way a vision checkpoint comes into existence: the base checkpoints ship "
+             "without a block.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect dataset, build items, and print stats without loading model weights or training.",
@@ -186,6 +199,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         raise
 
+    vision = None
+    if args.vision is not None:
+        try:
+            vision = json.loads(args.vision)
+        except ValueError as exc:
+            print("laya-train: error: --vision is not valid JSON: %s" % exc, file=sys.stderr)
+            return 2
+        if not isinstance(vision, dict):
+            print("laya-train: error: --vision must be a JSON object, got %s"
+                  % type(vision).__name__, file=sys.stderr)
+            return 2
+
     shuffle_opts = ("choice",) if args.shuffle_options else ()
     config = TrainConfig(
         epochs=args.epochs,
@@ -207,6 +232,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         eval_data=args.eval_data,
         target_error=args.target_error,
         min_abstain_n=args.min_abstain_n,
+        vision=vision,
     )
 
     try:

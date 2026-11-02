@@ -81,9 +81,10 @@ def _encoder(vision, hidden=16):
 
 
 def _encode_visual(enc):
+    """Mirror of `train._visual_encoder_fn`: the tower's **patches**, not the projected block."""
     def encode(pixels):
         with torch.no_grad():
-            return enc.encode(pixels.unsqueeze(0))[0]
+            return enc.encode_patches(pixels.unsqueeze(0))[0]
     return encode
 
 
@@ -107,9 +108,10 @@ def test_image_rows_become_items_that_carry_a_visual_block():
                                      vision=vision, encode_visual=_encode_visual(enc))
     assert skipped == {}, skipped
     assert len(items) == 3
-    assert sum(1 for it in items if "visual" in it) == 2
-    assert items[2].get("visual") is None, "a text row must train as text"
-    assert tuple(items[0]["visual"].shape) == (3, 16), items[0]["visual"].shape
+    assert sum(1 for it in items if "visual_patches" in it) == 2
+    assert items[2].get("visual_patches") is None, "a text row must train as text"
+    # Patches, not a projected block: the projector is trained, so it has to run inside the step.
+    assert tuple(items[0]["visual_patches"].shape) == (49, 32), items[0]["visual_patches"].shape
 
 
 def test_one_image_asked_many_questions_costs_one_tower_pass():
@@ -155,11 +157,14 @@ def test_encoding_a_vision_item_produces_a_plan_and_moves_the_markers():
     enc = _encoder(vision)
     items, _ = items_from_rows(_StubTok(), _rows(), max_len=512, head_max_len=192,
                                vision=vision, encode_visual=_encode_visual(enc))
-    vision_item = next(it for it in items if "visual" in it)
-    text_item = next(it for it in items if "visual" not in it)
+    from laya.train import _project_visual
+
+    vision_item = next(it for it in items if "visual_patches" in it)
+    text_item = next(it for it in items if "visual_patches" not in it)
     plain = encode_item(_StubTok(), text_item, 512, 192)
-    full = encode_item(_StubTok(), vision_item, 512, 192, vision=vision, max_positions=MAXPOS)
-    dropped = encode_item(_StubTok(), vision_item, 512, 192, vision=vision,
+    projected = _project_visual(vision_item, enc.projector)
+    full = encode_item(_StubTok(), projected, 512, 192, vision=vision, max_positions=MAXPOS)
+    dropped = encode_item(_StubTok(), projected, 512, 192, vision=vision,
                           drop_visual=True, max_positions=MAXPOS)
     assert "plan" in full and full["plan"].n_visual == 3
     assert "plan" not in dropped, "a dropped block must not plan positions for it"
@@ -238,18 +243,51 @@ def test_the_visual_block_changes_the_training_logits():
     embeds = model.encoder.embeddings
     table = getattr(embeds, "tok_embeddings", None) or embeds.word_embeddings
 
-    def logits(vis):
-        encoded = encode_item(tok, items[0], 512, 192, vision=vision, max_positions=MAXPOS)
-        encoded["visual"] = vis
+    from laya.train import _project_visual
+
+    def logits(patches):
+        encoded = encode_item(tok, _project_visual(dict(items[0], visual_patches=patches),
+                                                   enc.projector),
+                              512, 192, vision=vision, max_positions=MAXPOS)
         batch = collate_training_batch([encoded], tok.pad_token_id, embed_fn=table)
         with torch.no_grad():
             return _forward(model, batch, torch.device("cpu"), False, False)
 
     # Scaled, not offset: the encoder's embedding LayerNorm subtracts a per-token mean, so a
     # shifted block is the *same* block to the model (the FP1 finding, now on the training path).
-    a = logits(items[0]["visual"])
-    b = logits(items[0]["visual"] * 3.0)
+    a = logits(items[0]["visual_patches"])
+    b = logits(items[0]["visual_patches"] * 3.0)
     assert not torch.allclose(a, b), "the visual block must reach the training logits"
+
+
+def test_training_with_a_vision_encoder_attached_projects_inside_the_step():
+    """The wiring `finetune` uses, which the other training tests do not exercise.
+
+    `finetune` attaches the encoder to the model (`model.vision_encoder = encoder`), and the loop
+    has to find it there to put the projector in the optimizer. Building a model *without* that
+    attribute hid a shadowing bug for a whole round, so this test sets it.
+    """
+    torch.manual_seed(0)
+    model = _model()
+    tok = _StubTok()
+    vision = _vision()
+    enc = _encoder(vision)
+    model.vision_encoder = enc                       # exactly what finetune does
+    question = {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]}
+    rows = [{"state": {"image": {"pixels": torch.full((3, 32, 32), float(i))}, "text": "t%d" % i},
+             "questions": {"q": question}, "expected": {"q": "ab"[i % 2]}} for i in range(6)]
+    items, _ = items_from_rows(tok, rows, max_len=512, head_max_len=192,
+                               vision=vision, encode_visual=_encode_visual(enc))
+    embeds = model.encoder.embeddings
+    table = getattr(embeds, "tok_embeddings", None) or embeds.word_embeddings
+
+    before = enc.projector.proj.weight.detach().clone()
+    cfg = TrainConfig(epochs=1, micro_batch=3, grad_accum=1, head_lr=1e-2, log_every=0,
+                      loss="soft-ce", freeze_encoder=True)
+    train_model(model, tok, items, cfg, torch.device("cpu"), 512, 192,
+                vision=vision, embed_fn=table, max_positions=MAXPOS)
+    assert not torch.equal(before, enc.projector.proj.weight.detach()), \
+        "the projector did not move: it is not in the optimizer"
 
 
 if __name__ == "__main__":
@@ -262,4 +300,5 @@ if __name__ == "__main__":
     test_a_vision_checkpoint_defaults_to_soft_ce_and_text_to_rlcd()
     test_a_training_step_moves_the_loss_through_the_embeddings_path()
     test_the_visual_block_changes_the_training_logits()
+    test_training_with_a_vision_encoder_attached_projects_inside_the_step()
     print("all vision training tests passed")
