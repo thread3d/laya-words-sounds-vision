@@ -1092,6 +1092,37 @@ def test_an_unbundleable_tower_fails_loudly():
         raise AssertionError("a tower that cannot be saved must not be silently skipped")
 
 
+def test_a_long_scan_is_sized_against_the_visual_budget():
+    """`predict_long` must leave room for the block, or every window loses its tail silently.
+
+    Measured through `window_budget`, which is what `predict_long` sizes with: a window over
+    `max_len` and one over `max_len - n_visual_tokens` differ by exactly the block.
+    """
+    from laya.common import window_budget
+
+    tok = _stub_tokenizer()
+    internal = {"q": {"t": "choice", "ins": "pick", "crit": {"a": {"ins": ""}, "b": {"ins": ""}}}}
+    full = window_budget(tok, [internal["q"]], 512, 192)[0]
+    reduced = window_budget(tok, [internal["q"]], 512 - 64, 192)[0]
+    assert reduced < full, "a vision checkpoint must not size a window as if the block were free"
+    assert full - reduced == 64, (full, reduced)
+
+
+def test_predict_long_refuses_when_the_block_leaves_no_window():
+    agent = _vision_agent()
+    agent.vision = parse_vision({"vision": {"n_visual_tokens": 500, "image_size": 32}})
+    agent.cfg = {"max_len": 512, "head_max_len": 192}
+    internal = {"q": agent._to_internal({"type": "choice", "instructions": "pick",
+                                         "criteria": ["a", "b"]})}
+    try:
+        agent.predict_long("some long state " * 40, {"q": {"type": "choice", "instructions": "p",
+                                                           "criteria": ["a", "b"]}})
+    except ValueError as exc:
+        assert "visual tokens leave" in str(exc), exc
+    else:
+        raise AssertionError("a 500-token block in a 512 budget leaves no window and must be refused")
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -1153,6 +1184,8 @@ if __name__ == "__main__":
     test_the_same_bytes_decode_identically()
     test_a_bundled_tower_is_preferred_over_the_hub_id()
     test_an_unbundleable_tower_fails_loudly()
+    test_a_long_scan_is_sized_against_the_visual_budget()
+    test_predict_long_refuses_when_the_block_leaves_no_window()
     test_decode_uses_the_modality_temperature_for_image_rows_only()
     test_an_empty_modality_map_leaves_text_confidences_untouched()
     print("all vision foundation tests passed")

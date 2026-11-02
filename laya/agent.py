@@ -475,7 +475,11 @@ def _check_scan_budget(agent, evidence, sized, cfg_max_len, cfg_head_max_len, as
         return                                 # malformed questions are the validator's to report
     if not internal:
         return
-    room = min(state_room(agent.tok, q, eff_max_len, eff_head) for q in internal)
+    # The same visual-budget subtraction `predict_long` makes: the scan was sized against
+    # `max_len - n_visual_tokens`, so the room has to be measured against the same number or this
+    # check would pass a scan that no longer fits.
+    vision_tokens = agent.vision.n_visual_tokens if getattr(agent, "vision", None) is not None else 0
+    room = min(state_room(agent.tok, q, eff_max_len - vision_tokens, eff_head) for q in internal)
     if room >= sized:
         return
     raise ValueError(
@@ -1994,7 +1998,20 @@ class Agent(HookRegistry):
         for qid in ids:
             self._check_question(qid, questions[qid])
         internal = {qid: self._to_internal(questions[qid]) for qid in ids}
-        budget, step, room = window_budget(self.tok, [internal[qid] for qid in ids], max_len,
+        # A vision checkpoint spends part of `max_len` on the visual block, so the room a window
+        # has is smaller than the text arithmetic says. Sizing against `max_len` here would make
+        # every window `n_visual_tokens` wider than the sequence that scores it: `build_sequence`
+        # would re-truncate on the way in, the tail of every window would reach no model, and the
+        # reported span would claim it did -- the exact failure `window_budget`'s own docstring
+        # describes for an over-wide window.
+        vision_tokens = self.vision.n_visual_tokens if getattr(self, "vision", None) is not None else 0
+        window_max_len = max_len - vision_tokens
+        if vision_tokens and window_max_len < 64:
+            raise ValueError(
+                "predict_long: %d visual tokens leave %d of max_len=%d for a text window; raise "
+                "max_len or lower vision.n_visual_tokens before scanning a long state"
+                % (vision_tokens, window_max_len, max_len))
+        budget, step, room = window_budget(self.tok, [internal[qid] for qid in ids], window_max_len,
                                            head_max_len, window=window, stride=stride)
         # Snapshot the questions the scan was just sized against, BEFORE any start hook can
         # rewrite them, and compare against this instead of `questions` itself. `==` over the
