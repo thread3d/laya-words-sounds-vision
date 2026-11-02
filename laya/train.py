@@ -41,6 +41,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import torch
 
 from .calibrate import MIN_TYPE_N, fit_abstention_thresholds, fit_temperature_map
+from .vision import (VisualCache, build_vision_encoder, load_pixels, parse_vision,
+                     split_state, visual_plan)
 from .common import (
     OPTION_LAYOUTS,
     QTYPE_NAMES,
@@ -96,13 +98,14 @@ class TrainConfig:
     min_lr: float = 1e-6
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    loss: str = "rlcd"
+    loss: Optional[str] = None
     rl_samples: int = 4
     sigma_start: float = 0.4
     sigma_end: float = 0.1
     w_sph: float = 0.75
     w_rps: float = 1.0
     shuffle_options: Tuple[str, ...] = ()
+    modality_dropout: float = 0.0
     option_layout: Optional[str] = None
     freeze_encoder: bool = False
     calib_max: int = 400
@@ -123,9 +126,32 @@ class TrainConfig:
     target_error: float = 0.10
     min_abstain_n: int = 10
 
+    def resolve_loss(self, has_vision: bool) -> str:
+        """The objective to train with, given whether the checkpoint carries vision support.
+
+        `loss=None` means "the default for this checkpoint", and the default differs by design.
+        `rlcd` is what the text checkpoints were trained with, but for a vision checkpoint the
+        released recipe is measured to *trail* plain cross-entropy by 2.5-3.0 points, and after
+        temperature scaling no objective is better calibrated than CE (spec §7.3). So a vision
+        checkpoint starts from `soft-ce` unless the caller asks otherwise, and `rlcd` stays
+        available as a small-weight auxiliary to be tested rather than a default to be inherited.
+        """
+        if self.loss is not None:
+            return self.loss
+        return "soft-ce" if has_vision else "rlcd"
+
     def validate(self) -> None:
-        if self.loss not in LOSSES:
-            raise ValueError("loss must be one of %s, got %r" % (", ".join(LOSSES), self.loss))
+        if self.modality_dropout:
+            if isinstance(self.modality_dropout, bool) or not (0.0 <= self.modality_dropout < 1.0):
+                raise ValueError("modality_dropout must be in [0, 1), got %r"
+                                 % (self.modality_dropout,))
+            if self.modality_dropout >= 0.5:
+                raise ValueError(
+                    "modality_dropout=%r would train most items without their image, which is how "
+                    "a vision checkpoint becomes a text one" % (self.modality_dropout,))
+        if self.loss is not None and self.loss not in LOSSES:
+            raise ValueError("loss must be one of %s (or None for the checkpoint default), got %r"
+                             % (", ".join(LOSSES), self.loss))
         unknown = sorted(set(self.shuffle_options) - set(QTYPES))
         if unknown:
             raise ValueError("shuffle_options names unknown question type(s): %s" % ", ".join(unknown))
@@ -316,8 +342,15 @@ def make_item(tok, q: Dict[str, Any], target: Sequence[float], state_ids: List[i
 
 def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                     head_max_len: int,
-                    label_smoothing: float = 0.0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+                    label_smoothing: float = 0.0,
+                    vision=None, encode_visual=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Items from `{state, questions, gold}` or `{state, questions, expected}` rows; returns `(items, skipped)`.
+
+    With `vision` set and `encode_visual` supplied (a callable pixels -> `[n_visual, hidden]`),
+    a row whose state carries an image is split the way `Agent._encode_state` splits it: the text
+    half is tokenized, the image is encoded once per distinct picture through a `VisualCache`, and
+    the block is attached to every item built from that row -- so one image asked five questions
+    costs one tower pass, not five.
 
     `skipped` counts, by reason, questions that were labelled but could not become an item:
     `empty_text`, `empty_label`, `invalid_question` and `invalid_target` (a `ValueError` from
@@ -326,12 +359,27 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
     simply does not label them.
     """
     items, skipped = [], {}
+    cache = VisualCache() if (vision is not None and encode_visual is not None) else None
     for row in rows:
         state = row.get("state")
+        visual = None
+        text_budget = max_len
+        if vision is not None and encode_visual is not None and state is not None:
+            state, image_spec = split_state(state)
+            if image_spec is not None:
+                pixels = load_pixels(image_spec, vision.image_size)
+                visual = cache.get_or_encode(pixels, encode_visual)
+                text_budget = max_len - vision.n_visual_tokens
+                if text_budget < 16:
+                    skipped["image_too_large"] = skipped.get("image_too_large", 0) + 1
+                    continue
         if state is None or (isinstance(state, str) and not state.strip()):
-            skipped["empty_text"] = skipped.get("empty_text", 0) + 1
-            continue
-        state_ids = encode_state(tok, state, max_len)
+            # An image on its own is a legal state (spec §6.5): the picture is the evidence.
+            if visual is None:
+                skipped["empty_text"] = skipped.get("empty_text", 0) + 1
+                continue
+            state = ""
+        state_ids = encode_state(tok, state, text_budget)
         for qid, question in row.get("questions", {}).items():
             gold_q = row.get("gold", {}).get(qid) if isinstance(row.get("gold"), dict) else None
             expected_q = row.get("expected", {}).get(qid) if isinstance(row.get("expected"), dict) else None
@@ -356,6 +404,8 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
             if reason is None:
                 item, reason = make_item(tok, q, target, state_ids, head_max_len, max_len)
             if reason is None:
+                if visual is not None:
+                    item["visual"] = visual
                 items.append(item)
             else:
                 skipped[reason] = skipped.get(reason, 0) + 1
@@ -444,13 +494,24 @@ def read_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
-                option_order: Optional[List[int]] = None, parallel: bool = False) -> Dict[str, Any]:
+                option_order: Optional[List[int]] = None, parallel: bool = False,
+                vision=None, drop_visual: bool = False,
+                max_positions: int = 8192) -> Dict[str, Any]:
     """The model input for an item, with options in `option_order` and the target to match.
 
     `build_sequence` puts option `option_order[s]` in slot `s`, so the slot-ordered target is
     `target[option_order[s]]` -- the inverse of what `unpermute_probs` does at inference.
+
+    A vision item carries its encoded `visual` block; `drop_visual` trains it as text-only, which
+    is what modality dropout does, and the text budget is `max_len - n_visual` so the spliced
+    sequence still fits the checkpoint's own `max_len` (the budget inference uses).
     """
-    ids, markers, *layout = build_sequence(tok, None, item["q"], max_len, head_max_len, option_order=option_order,
+    visual = item.get("visual") if vision is not None else None
+    budget = max_len
+    if visual is not None and vision is not None:
+        budget = max_len - vision.n_visual_tokens
+    ids, markers, *layout = build_sequence(tok, None, item["q"], budget, head_max_len,
+                                           option_order=option_order,
                                            state_ids=item["state_ids"], return_layout=parallel)
     target = item["target"]
     if option_order is not None:
@@ -458,6 +519,14 @@ def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
     encoded = {"ids": ids, "markers": markers, "qtype": item["qtype"], "target": target}
     if layout:
         encoded["layout"] = layout[0]
+    if visual is not None and vision is not None and not drop_visual:
+        head_ids, _, _ = build_head(tok, item["q"], head_max_len, option_order=option_order)
+        plan = visual_plan(vision, text_len=len(ids), markers=markers, head_len=len(head_ids),
+                           max_len=max_len, max_position_embeddings=max_positions,
+                           option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+        encoded["visual"] = visual
+        encoded["plan"] = plan
+        encoded["markers"] = plan.marker_positions
     return encoded
 
 
@@ -632,7 +701,56 @@ def update_budget_message(n_train: int, config: TrainConfig) -> str:
                config.micro_batch, config.grad_accum, updates, config.epochs))
 
 
+def _embedding_lookup(model):
+    """The encoder's own *pre-norm* token embedding, the space a visual block joins."""
+    enc = getattr(model, "encoder", None) or getattr(model, "_orig_mod", None)
+    if enc is not None and not hasattr(enc, "embeddings"):
+        enc = getattr(enc, "encoder", enc)
+    table = getattr(getattr(enc, "embeddings", None), "tok_embeddings", None)
+    if table is None:
+        table = enc.embeddings.word_embeddings
+    return lambda ids: table(ids)
+
+
+def _visual_encoder_fn(encoder):
+    """`pixels [3, H, W]` -> `[n_visual, hidden]`, matching the inference path exactly."""
+    def encode(pixels):
+        with torch.no_grad():
+            return encoder.encode(pixels.unsqueeze(0))[0]
+    return encode
+
+
+def collate_training_batch(chunk: Sequence[Dict[str, Any]], pad_id: int, embed_fn=None):
+    """Collate encoded items, through the visual path when any of them carries a block.
+
+    A mixed chunk -- some rows with an image, some without -- is legitimate and is what modality
+    dropout produces, so the decision is per chunk rather than per run: if a single row has a
+    visual block, every row of the chunk is spliced and the ones without simply have none.
+    """
+    if any("visual" in it for it in chunk):
+        if embed_fn is None:
+            raise ValueError("a chunk carrying a visual block needs `embed_fn` to embed the text "
+                             "half; pass the encoder's own token-embedding lookup")
+        from .vision import collate_visual
+        return collate_visual(list(chunk), embed_fn, pad_id)
+    return collate_items([list(chunk)], pad_id)
+
+
 def _forward(model, batch, device, amp: bool, detach_encoder: bool):
+    if "inputs_embeds" in batch:
+        # Vision: the visual block is already spliced into the token embeddings (see
+        # `collate_training_batch`), so there are no token ids to send.
+        args = (None, batch["attention_mask"].to(device), batch["marker_pos"].to(device),
+                batch["marker_mask"].to(device), batch["qtype"].to(device))
+        kwargs = {"detach_encoder": detach_encoder,
+                  "position_ids": batch["position_ids"].to(device),
+                  "inputs_embeds": batch["inputs_embeds"].to(device)}
+        if amp:
+            with torch.autocast(device.type, dtype=torch.float16):
+                logits, _act = model(*args, **kwargs)
+        else:
+            logits, _act = model(*args, **kwargs)
+        return logits.float()
     args = (batch["input_ids"].to(device), batch["attention_mask"].to(device),
             batch["marker_pos"].to(device), batch["marker_mask"].to(device), batch["qtype"].to(device))
     kwargs = {"detach_encoder": detach_encoder}
@@ -649,8 +767,14 @@ def _forward(model, batch, device, amp: bool, detach_encoder: bool):
 def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig, device: torch.device,
                 max_len: int, head_max_len: int,
                 on_epoch_end: Optional[Callable[[int, float], None]] = None,
-                parallel: bool = False) -> List[float]:
-    """Train `model` in place on `items`; returns the mean loss of each epoch."""
+                parallel: bool = False, vision=None, embed_fn=None,
+                max_positions: int = 8192) -> List[float]:
+    """Train `model` in place on `items`; returns the mean loss of each epoch.
+
+    `vision` is the checkpoint's parsed vision config and `embed_fn` its token-embedding lookup.
+    Both are needed only when items carry a visual block; a text run passes neither and takes the
+    same `collate_items` path it always did.
+    """
     config.validate()
     if not items:
         raise ValueError("no training items")
@@ -692,10 +816,19 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
         total, n_steps = 0.0, 0
         optimizer.zero_grad(set_to_none=True)
         for start in range(0, len(epoch_items), config.micro_batch):
+            window = epoch_items[start:start + config.micro_batch]
+            # Modality dropout is drawn from the epoch's own RNG, so a run is reproducible and the
+            # same item is not dropped on every epoch. Dropping is per *item*: the target stays
+            # the true answer, which is what teaches the model that the text alone is sometimes
+            # all it gets -- and, on the image-required items, that it is not enough.
             chunk = [encode_item(tok, it, max_len, head_max_len,
-                                 draw_option_order(it, order_rng, config.shuffle_options), parallel)
-                     for it in epoch_items[start:start + config.micro_batch]]
-            batch = collate_items([chunk], tok.pad_token_id)
+                                 draw_option_order(it, order_rng, config.shuffle_options), parallel,
+                                 vision=vision, max_positions=max_positions,
+                                 drop_visual=bool(vision is not None and config.modality_dropout
+                                                  and order_rng.random() < config.modality_dropout))
+                     for it in window]
+            batch = collate_training_batch(chunk, tok.pad_token_id,
+                                           embed_fn=embed_fn if vision is not None else None)
             logits = _forward(model, batch, device, amp, config.freeze_encoder)
             mask = batch["marker_mask"].to(device)
             target = batch["target"].to(device)
@@ -737,7 +870,8 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
 
 @torch.no_grad()
 def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: torch.device,
-                        max_len: int, head_max_len: int, batch_size: int = 16, parallel: bool = False):
+                        max_len: int, head_max_len: int, batch_size: int = 16, parallel: bool = False,
+                        vision=None, embed_fn=None, max_positions: int = 8192):
     """`(qtype, logits, target, k)` records for `fit_temperature_map`, options in canonical order."""
     model.eval()
     records = []
@@ -1007,11 +1141,32 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     if config.option_layout is not None:
         cfg = dict(cfg, option_layout=config.option_layout)
     parallel = uses_parallel_layout(cfg)
+    if parallel and parse_vision(cfg) is not None:
+        raise ValueError("a vision checkpoint cannot train on the parallel option layout: its "
+                         "masks are built from token ids and there are none once the visual block "
+                         "is spliced in")
+
+    # Vision. A checkpoint with no "vision" block parses to None and every branch below is
+    # skipped, so a text fine-tune is bit-for-bit what it was -- including its objective, which
+    # stays `rlcd` while a vision run starts from `soft-ce` (see `TrainConfig.resolve_loss`).
+    vision = parse_vision(cfg)
+    max_positions = int(getattr(model.encoder.config, "max_position_embeddings", 8192))
+    embed_fn = None
+    encode_visual = None
+    if vision is not None:
+        encoder = build_vision_encoder(vision, hidden_size=model.encoder.config.hidden_size)
+        model.vision_encoder = encoder
+        embed_fn = _embedding_lookup(model)
+        encode_visual = _visual_encoder_fn(encoder)
+        print("vision checkpoint: tower %s, %d visual tokens, modality dropout %g"
+              % (vision.tower, vision.n_visual_tokens, config.modality_dropout), flush=True)
+    config.loss = config.resolve_loss(vision is not None)
 
     rows = read_data(data, text_column=config.text_column, label_column=config.label_column,
                      question_id=config.question_id, instructions=config.instructions)
     items, skipped = items_from_rows(tok, rows, max_len, head_max_len,
-                                     label_smoothing=config.label_smoothing)
+                                     label_smoothing=config.label_smoothing,
+                                     vision=vision, encode_visual=encode_visual)
     if not items:
         raise ValueError("%s produced no training items (skipped: %r)" % (data, skipped))
     train_items, calib_items = split_calibration(items, config.calib_max, config.calib_frac, config.calib_seed)
@@ -1127,7 +1282,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
                         os.path.join(output_dir, "checkpoint_latest"))
 
     history = train_model(model, tok, train_items, config, dev, max_len, head_max_len,
-                          on_epoch_end=checkpoint_latest, parallel=parallel)
+                          on_epoch_end=checkpoint_latest, parallel=parallel,
+                          vision=vision, embed_fn=embed_fn, max_positions=max_positions)
 
     records = calibration_records(model, tok, calib_items, dev, max_len, head_max_len, parallel=parallel)
     collapse_msg = prior_collapse_message(records)

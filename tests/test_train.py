@@ -457,7 +457,14 @@ class LossTests(unittest.TestCase):
 
     def test_defaults_train_like_the_notebook(self):
         config = TrainConfig()
-        self.assertEqual((config.loss, config.shuffle_options), ("rlcd", ()))
+        # `loss` is None by default and *resolves*: an unset objective takes the checkpoint's
+        # default, which is the notebook's `rlcd` for text and `soft-ce` for vision (the released
+        # RLCD recipe trails cross-entropy by 2.5-3.0 points; docs/vision-decision-system.md §7.3).
+        self.assertIsNone(config.loss)
+        self.assertEqual(config.resolve_loss(has_vision=False), "rlcd")
+        self.assertEqual(config.resolve_loss(has_vision=True), "soft-ce")
+        self.assertEqual(TrainConfig(loss="rlcd").resolve_loss(has_vision=True), "rlcd")
+        self.assertEqual(config.shuffle_options, ())
         self.assertEqual(config.micro_batch * config.grad_accum, 64)
 
     def test_config_rejects_unknown_values(self):

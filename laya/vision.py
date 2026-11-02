@@ -652,6 +652,10 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
     pos = torch.zeros(len(items), width, dtype=torch.long)
     mpos = torch.zeros(len(items), k_max, dtype=torch.long)
     mmask = torch.zeros(len(items), k_max, dtype=torch.bool)
+    # Training batches carry a target; inference batches do not. Mirrors `collate_items`, including
+    # its refusal of a target longer than the row's own marker count.
+    has_target = any("target" in it for it in items)
+    target = torch.zeros(len(items), k_max, dtype=torch.float32) if has_target else None
 
     for i, it in enumerate(items):
         ids = it["ids"]
@@ -664,7 +668,14 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
         k = len(it["markers"])
         mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long)
         mmask[i, :k] = True
-    return {
+        if has_target and "target" in it:
+            t = it["target"]
+            if len(t) > k:
+                raise ValueError(
+                    "collate_visual: item %d has %d target entries but only %d marker positions; "
+                    "a target needs one entry per option" % (i, len(t), k))
+            target[i, :len(t)] = torch.tensor([float(v) for v in t], dtype=torch.float32)
+    out = {
         "inputs_embeds": embeds,
         "attention_mask": att,
         "position_ids": pos,
@@ -672,6 +683,9 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
         "marker_mask": mmask,
         "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long),
     }
+    if target is not None:
+        out["target"] = target
+    return out
 
 
 # ------------------------------------------------------------------------------------------------
