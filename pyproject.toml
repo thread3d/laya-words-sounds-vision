@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "laya"
-version = "0.4.23"
+version = "0.4.24"
 description = "Fast, non-autoregressive System 1 decision engine with calibrated probabilities"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,6 +51,12 @@ mcp = ["mcp>=2.2.0"]
 
 # `pip install laya[structured]` adds pydantic for the typed-model helpers (laya/structured.py).
 structured = ["pydantic>=2.0.0"]
+
+# `pip install laya[vision]` adds Pillow, which `laya.vision.load_pixels` needs to decode a path or
+# base64 image into pixels. It is optional on purpose: the package's declared dependencies stay
+# torch/transformers/safetensors/huggingface_hub/numpy, so a text-only install never grows an image
+# stack. A caller with its own decoder can pass `{"image": {"pixels": <tensor>}}` and skip it.
+vision = ["pillow>=9.0.0"]
 
 # `pip install laya[onnx]` adds ONNX Runtime for `laya.onnx_agent` and `onnxscript`, which
 # `torch.onnx.export` requires (`scripts/export_onnx.py`, `tests/test_onnx.py`).

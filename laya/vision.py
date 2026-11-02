@@ -39,7 +39,10 @@ Two facts about splicing into a HF encoder that cost real debugging time and are
   mean. A "zeroed visual block" ablation is therefore indistinguishable from a block of any constant,
   and a projector whose rows are near-identical carries no information into the encoder at all.
 """
+import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 # Slots the builder understands. `after_options` is the only one implemented; the others are named
 # so a config naming them fails loudly at load with a list of what exists, rather than silently
@@ -60,6 +63,9 @@ VISION_DEFAULTS: Dict[str, Any] = {
     "position_offset": None,     # None -> reserved block at the top of the positional budget
     "keep_layers": None,         # None -> the tower's last block; N -> read N blocks early
     "summary_for_options_over": 96,   # rendered option tokens that trigger a [VIS_SUMMARY] token
+    "pixel_mean": 0.5,          # SigLIP's processor rescales 1/255 then normalises by 0.5/0.5
+    "pixel_std": 0.5,
+    "cache_size": 64,           # distinct images kept in the per-agent visual-block cache
 }
 
 
@@ -93,6 +99,12 @@ class VisionConfig:
             raise ValueError("vision.n_visual_tokens must be >= 1, got %d" % self.n_visual_tokens)
         if not isinstance(self.image_size, int) or self.image_size < 1:
             raise ValueError("vision.image_size must be a positive int, got %r" % (self.image_size,))
+        for key in ("pixel_mean", "pixel_std"):
+            val = getattr(self, key)
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or not val > 0:
+                raise ValueError("vision.%s must be a positive number, got %r" % (key, val))
+        if not isinstance(self.cache_size, int) or self.cache_size < 1:
+            raise ValueError("vision.cache_size must be a positive int, got %r" % (self.cache_size,))
         if self.keep_layers is not None and (not isinstance(self.keep_layers, int) or self.keep_layers < 1):
             raise ValueError("vision.keep_layers must be None or a positive int, got %r"
                              % (self.keep_layers,))
@@ -343,8 +355,15 @@ class VisionEncoder:
         return self.train(False)
 
     def encode(self, pixel_values):
-        """``[B, 3, H, W]`` pixels -> ``[B, n_visual_tokens, hidden]`` visual embeddings."""
+        """``[B, 3, H, W]`` pixels in [0, 1] -> ``[B, n_visual_tokens, hidden]`` embeddings.
+
+        Pixel normalisation happens here rather than in `load_pixels`, because it belongs to the
+        tower: SigLIP's processor rescales 1/255 and then maps [0, 1] through (x - mean) / std with
+        0.5/0.5, so a caller handing over raw [0, 1] pixels would otherwise feed the tower values it
+        was never trained on. Both constants are config fields so a different tower can move them.
+        """
         torch = _torch()
+        pixel_values = (pixel_values - self.config.pixel_mean) / self.config.pixel_std
         with torch.no_grad() if not self._tower_trains() else _nullcontext():
             out = self.tower(pixel_values=pixel_values)
         patches = getattr(out, "last_hidden_state", None)
@@ -443,3 +462,206 @@ def _tower_width(tower) -> int:
 def tower_parameters(encoder: VisionEncoder):
     """The trainable parameters of a vision encoder (the tower stays frozen by default)."""
     return encoder.projector.parameters()
+
+
+# ------------------------------------------------------------------------------------------------
+# Images inside a state
+# ------------------------------------------------------------------------------------------------
+
+# Keys a state may use to carry an image. `text` is the companion text, and it may be absent: an
+# image on its own is a legal state (spec §6.5).
+IMAGE_KEYS = ("image", "image_path", "image_base64")
+
+
+def split_state(state):
+    """Separate a state into its text half and its image spec.
+
+    Returns ``(text_state, image_spec)``. For anything that carries no image this is
+    ``(state, None)`` -- the caller only invokes it when the checkpoint has vision support, so a
+    text checkpoint never has a state reshaped underneath it (spec C6).
+
+    Recognised shapes::
+
+        {"image": <spec>, "text": "..."}      # explicit
+        {"image": <spec>}                     # the image is the whole state
+        {"image_path": "a.png"}               # shorthand
+
+    `<spec>` is a path string, a base64 string, or a mapping with a ``pixels`` entry holding an
+    already-decoded tensor/array (which is how a caller with its own decoder, and the tests,
+    bypass Pillow entirely).
+    """
+    if not isinstance(state, dict):
+        return state, None
+    spec = None
+    for key in IMAGE_KEYS:
+        if key in state:
+            spec = state[key]
+            break
+    if spec is None:
+        return state, None
+    text = state.get("text")
+    # Everything except the image key and the text companion is still state the model should see,
+    # so it is not dropped: {"image": ..., "vendor": "acme"} keeps "vendor" as data.
+    rest = {k: v for k, v in state.items() if k not in IMAGE_KEYS and k != "text"}
+    if text is None:
+        return (rest if rest else ""), spec
+    if rest:
+        merged = dict(rest)
+        merged["text"] = text
+        return merged, spec
+    return text, spec
+
+
+def load_pixels(spec, image_size: int = 224):
+    """Decode an image spec into a ``[3, image_size, image_size]`` float tensor in [0, 1].
+
+    Pillow is an optional dependency (`pip install laya[vision]`), imported here rather than at
+    module import so a text-only deployment never pays for it. A spec carrying `pixels` bypasses
+    decoding entirely.
+    """
+    torch = _torch()
+    if isinstance(spec, dict) and "pixels" in spec:
+        px = spec["pixels"]
+        if not torch.is_tensor(px):
+            px = torch.as_tensor(px)
+        return _fit(px, image_size)
+    if not isinstance(spec, (str, bytes)):
+        raise TypeError("an image must be a path/base64 string or {'pixels': ...}, got %s"
+                        % type(spec).__name__)
+    try:
+        from PIL import Image
+    except ImportError as exc:                                  # pragma: no cover - optional dep
+        raise ImportError(
+            "loading an image needs Pillow: `pip install laya[vision]`, or pass "
+            "{'image': {'pixels': <tensor>}} with your own decoder") from exc
+    import base64
+    import io
+    if isinstance(spec, str) and spec.startswith(("http://", "https://")):
+        raise ValueError("laya does not fetch images: resolve the URL in the caller (the HTTP "
+                         "server owns its own timeouts and limits) and pass a path or bytes")
+    raw = base64.b64decode(spec) if isinstance(spec, bytes) or _looks_base64(spec) else None
+    src = io.BytesIO(raw) if raw is not None else spec
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        im = im.resize((image_size, image_size))
+        arr = np.asarray(im, dtype="float32") / 255.0
+    return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+
+
+def _looks_base64(spec: str) -> bool:
+    if not isinstance(spec, str) or os.path.exists(spec):       # a real path wins over a guess
+        return False
+    stripped = spec.strip()
+    if len(stripped) < 64 or len(stripped) % 4:
+        return False
+    return all(c.isalnum() or c in "+/=\n\r" for c in stripped)
+
+
+def _fit(px, image_size: int):
+    torch = _torch()
+    if px.dim() == 4:
+        px = px[0]
+    if px.dim() == 2:
+        px = px.unsqueeze(0).repeat(3, 1, 1)
+    if px.dim() != 3:
+        raise ValueError("pixels must be [3, H, W] or [H, W], got %s" % (tuple(px.shape),))
+    if px.size(0) == 1:
+        px = px.repeat(3, 1, 1)
+    elif px.size(0) > 3:
+        px = px[:3]
+    px = px.float()
+    if px.max() > 1.5:                       # 0..255 input
+        px = px / 255.0
+    if px.size(1) != image_size or px.size(2) != image_size:
+        px = torch.nn.functional.interpolate(px.unsqueeze(0), size=(image_size, image_size),
+                                             mode="bilinear", align_corners=False).squeeze(0)
+    return px
+
+
+class VisualCache:
+    """Content-addressed cache of the visual block, so one image is encoded once per call.
+
+    The spec's §4.6: `predict_batch` already tokenizes a shared state once and reuses the ids
+    across every question; the vision pass needs the same treatment and more urgently, because the
+    tower is the expensive half. Keyed by a hash of the normalised pixels -- two encodings of the
+    same picture are one image -- with a bounded size so a long-lived server cannot grow without
+    limit.
+    """
+
+    def __init__(self, max_entries: int = 64):
+        self.max_entries = max(1, int(max_entries))
+        self._store = _ordered_dict()
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def key(pixels) -> str:
+        import hashlib
+        return hashlib.sha256(pixels.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+    def get_or_encode(self, pixels, encode):
+        k = self.key(pixels)
+        if k in self._store:
+            self.hits += 1
+            self._store.move_to_end(k)
+            return self._store[k]
+        self.misses += 1
+        value = encode(pixels)
+        self._store[k] = value
+        while len(self._store) > self.max_entries:
+            self._store.popitem(last=False)
+        return value
+
+    def clear(self):
+        self._store.clear()
+
+
+def _ordered_dict():
+    from collections import OrderedDict
+    return OrderedDict()
+
+
+def collate_visual(items, embed_fn, pad_id: int = 0):
+    """Collate already-encoded items that carry a visual block into one batch.
+
+    `items` is the flat list of question rows (every state's rows, in order). Each row carries
+    ``ids`` (its text sequence), ``markers`` (already shifted by :func:`visual_plan`) and
+    ``visual`` (``[n_visual, D]``) plus ``plan``.
+
+    The visual block is the same width on every row, so right-padding the *text* means a row's
+    splice point is its own and nothing needs shifting; the padded batch is therefore
+    ``max(len(ids)) + n_visual`` wide, and the trailing pad of a short row lands after its text.
+
+    Returns the keys `DecisionModel.forward` needs, with `inputs_embeds` in place of `input_ids`.
+    """
+    torch = _torch()
+    n_visual = items[0]["plan"].n_visual
+    width = max(len(it["ids"]) for it in items) + n_visual
+    k_max = max(len(it["markers"]) for it in items)
+    hidden = items[0]["visual"].size(-1)
+
+    embeds = torch.zeros(len(items), width, hidden)
+    att = torch.zeros(len(items), width, dtype=torch.long)
+    pos = torch.zeros(len(items), width, dtype=torch.long)
+    mpos = torch.zeros(len(items), k_max, dtype=torch.long)
+    mmask = torch.zeros(len(items), k_max, dtype=torch.bool)
+
+    for i, it in enumerate(items):
+        ids = it["ids"]
+        tok = embed_fn(torch.tensor(ids, dtype=torch.long))
+        row = assemble_inputs_embeds(tok.unsqueeze(0), it["visual"].unsqueeze(0), it["plan"])[0]
+        n = row.size(0)
+        embeds[i, :n] = row
+        att[i, :n] = 1
+        pos[i, :n] = torch.tensor(it["plan"].position_ids, dtype=torch.long)
+        k = len(it["markers"])
+        mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long)
+        mmask[i, :k] = True
+    return {
+        "inputs_embeds": embeds,
+        "attention_mask": att,
+        "position_ids": pos,
+        "marker_pos": mpos,
+        "marker_mask": mmask,
+        "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long),
+    }

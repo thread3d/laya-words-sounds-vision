@@ -24,6 +24,7 @@ from .calibrate import (
     fit_temperature_map,
 )
 from .common import (
+    build_head,
     QTYPES,
     TEMP_MAX,
     TEMP_MIN,
@@ -51,6 +52,8 @@ from .common import (
     window_budget,
 )
 from .confidence import apply_confidence_gate, check_min_confidence
+from .vision import (VisualCache, build_vision_encoder, collate_visual, load_pixels,
+                     parse_vision, split_state, visual_plan)
 from .hooks import (
     HookRegistry, PredictContext, _as_sequence, aggregate_usage, compose_hooks, dispatch,
     normalise_hooks, validate_timeout,
@@ -734,6 +737,21 @@ class Agent(HookRegistry):
 
         self.model.load_state_dict(weights, strict=True)
 
+        # Vision. A checkpoint whose config carries no "vision" block parses to None and every
+        # branch below is skipped -- which is what keeps a text checkpoint's sequences
+        # byte-identical (spec C6). Parsed before `compile` wraps `self.model`, so the encoder
+        # config is still reachable.
+        self.vision = parse_vision(
+            self.cfg,
+            max_position_embeddings=getattr(self.model.encoder.config, "max_position_embeddings", None))
+        self.vision_encoder = None
+        self._visual_cache = VisualCache(self.cfg.get("vision", {}).get("cache_size", 64)) \
+            if self.vision is not None else None
+        if self.vision is not None and fast:
+            raise ValueError(
+                "a vision checkpoint cannot use fast=True: the TileLang path is built for the "
+                "five-input input_ids forward and has no visual-token path yet")
+
         # ModernBERT's reference_compile defaults to "auto" and will torch.compile the encoder.
         # That is a loss for the batch sizes Laya runs (a handful of questions per call) and can
         # hang on some platforms, so keep the eager path unless explicitly requested.
@@ -1190,6 +1208,57 @@ class Agent(HookRegistry):
             q["option_order"] = [int(i) for i in qdef["option_order"]]
         return q
 
+    def _token_embeddings(self, ids):
+        """The encoder's own token-embedding lookup, in the space the visual block joins.
+
+        Pre-norm on purpose: the encoder applies its embedding LayerNorm to `inputs_embeds` as
+        well, so handing it the post-norm output would normalise the sequence twice (see
+        `laya.vision`'s module docstring).
+        """
+        enc = getattr(self.model, "encoder", None) or getattr(self.model, "_orig_mod", None)
+        if enc is not None and not hasattr(enc, "embeddings"):
+            enc = getattr(enc, "encoder", enc)
+        emb = enc.embeddings
+        table = getattr(emb, "tok_embeddings", None)
+        if table is None:
+            table = emb.word_embeddings
+        return table(ids.to(table.weight.device))
+
+    def _visual_block(self, image_spec):
+        """Encode one image into the visual block, memoised by the hash of its pixels.
+
+        The tower pass is the expensive half of a vision decision, and a call that asks several
+        questions about one image must not pay it several times (spec §4.6). The cache is keyed on
+        normalised pixels, so two encodings of the same picture are one entry.
+        """
+        if self.vision is None:                                   # pragma: no cover - guarded
+            raise ValueError("this checkpoint has no vision support")
+        if self.vision_encoder is None:
+            self.vision_encoder = build_vision_encoder(
+                self.vision,
+                hidden_size=self.model.encoder.config.hidden_size,
+                dtype=self.dtype if self.device.type != "cuda" else None)
+            self.vision_encoder.eval()
+        pixels = load_pixels(image_spec, self.vision.image_size)
+        encoder = self.vision_encoder
+
+        def encode(px):
+            with torch.no_grad():
+                return encoder.encode(px.unsqueeze(0).to(self.device))[0]
+
+        block = self._visual_cache.get_or_encode(pixels, encode)
+        # Match the token embedding table: `assemble_inputs_embeds` concatenates the two, and a
+        # bf16 checkpoint against an fp32 projector would raise inside torch.cat.
+        return block.to(self.device, dtype=self._embed_dtype())
+
+    def _embed_dtype(self):
+        enc = getattr(self.model, "encoder", None) or getattr(self.model, "_orig_mod", None)
+        if enc is not None and hasattr(enc, "encoder"):
+            enc = enc.encoder
+        table = getattr(getattr(enc, "embeddings", None), "tok_embeddings", None) \
+            or getattr(getattr(enc, "embeddings", None), "word_embeddings", None)
+        return table.weight.dtype if table is not None else self.dtype
+
     def _encode_state(self, state: Union[str, dict, list], ids: List[str], internal: Dict[str, Dict],
                       max_len: Optional[int] = None, head_max_len: Optional[int] = None) -> List[Dict]:
         """Tokenize one state against every (already validated + normalized) question.
@@ -1199,6 +1268,21 @@ class Agent(HookRegistry):
         """
         max_len = self.cfg.get("max_len", 512) if max_len is None else max_len
         head_max_len = self.cfg.get("head_max_len", 192) if head_max_len is None else head_max_len
+        # Vision: a state may carry an image. Only when this checkpoint has vision support, so a
+        # text checkpoint never has a state reshaped underneath it (spec C6).
+        visual = None
+        text_len_budget = max_len
+        vision_cfg = getattr(self, "vision", None)
+        if vision_cfg is not None:
+            state, image_spec = split_state(state)
+            if image_spec is not None:
+                visual = self._visual_block(image_spec)
+                text_len_budget = max_len - vision_cfg.n_visual_tokens
+                if text_len_budget < 16:
+                    raise ValueError(
+                        "vision: %d visual tokens leave %d for the text sequence in max_len=%d; "
+                        "lower vision.n_visual_tokens or raise max_len"
+                        % (vision_cfg.n_visual_tokens, text_len_budget, max_len))
         # A chronological conversation list is serialized newest-last, so the default
         # right-truncation (st[:room]) would silently drop the newest turn. Truncate
         # from the left for lists so the most recent intent is preserved.
@@ -1216,7 +1300,8 @@ class Agent(HookRegistry):
         for qid in ids:
             q = internal[qid]
             seq, markers, stats, state_stats, *layout = build_sequence(
-                self.tok, state, q, max_len, head_max_len, option_order=q.get("option_order"),
+                self.tok, state, q, text_len_budget, head_max_len,
+                option_order=q.get("option_order"),
                 truncate_left=truncate_left, state_ids=state_ids, return_stats=True,
                 return_truncation_stats=True, return_layout=self.parallel_options)
             n_opts = stats["options"]
@@ -1238,6 +1323,17 @@ class Agent(HookRegistry):
                     % (qid, len(markers), n_opts, max_len, head_max_len))
             item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
                     "state_stats": state_stats}
+            if visual is not None:
+                head_ids, _, _ = build_head(self.tok, q, head_max_len,
+                                            option_order=q.get("option_order"))
+                plan = visual_plan(
+                    vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
+                    max_len=max_len,
+                    max_position_embeddings=self.model.encoder.config.max_position_embeddings,
+                    option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                item["visual"] = visual
+                item["plan"] = plan
+                item["markers"] = plan.marker_positions
             if layout:
                 item["layout"] = layout[0]
             items.append(item)
@@ -1273,19 +1369,30 @@ class Agent(HookRegistry):
             # checkpoint's batch without its masks.
             raise ValueError("this checkpoint uses option_layout='parallel', which only the eager "
                              "backend runs; load it without fast=/compile= or call set_backend('eager')")
-        if self._compiled and self._fast is None and self.device.type == "cuda":
+        if self._compiled and self._fast is None and self.device.type == "cuda" \
+                and "inputs_embeds" not in b:
             b = _pad_cuda_compile_batch(b, self.tok.pad_token_id)
-        use_amp = self._amp_enabled_for(b["input_ids"].shape[0])
+        # A vision batch carries `inputs_embeds` and no `input_ids`; the row count and the
+        # sequence width are the only two facts the checks below need from it.
+        vision_batch = "inputs_embeds" in b
+        rows = b["inputs_embeds"].shape[0] if vision_batch else b["input_ids"].shape[0]
+        width = b["inputs_embeds"].shape[1] if vision_batch else b["input_ids"].shape[1]
+        use_amp = self._amp_enabled_for(rows)
+
+        if vision_batch and self._compiled:
+            raise ValueError("a vision batch cannot run under compile=: the compiled path pads "
+                             "and re-shapes `input_ids`, which a visual block does not have. "
+                             "Load the checkpoint without compile=, or use eager")
 
         limit = getattr(self._backend, "max_len", None)
-        if limit is not None and b["input_ids"].shape[1] > limit:
+        if limit is not None and width > limit:
             raise ValueError("the %s backend was built for max_len=%d; this request needs %d tokens"
-                             % (self.backend, limit, b["input_ids"].shape[1]))
-        if self._fast is not None and b["input_ids"].shape[1] > self._fast.max_len:
+                             % (self.backend, limit, width))
+        if self._fast is not None and width > self._fast.max_len:
             raise ValueError(
                 "the CUDA fast path was built for max_len=%d; this request needs %d tokens. "
                 "Use max_len <= %d or load without fast=True."
-                % (self._fast.max_len, b["input_ids"].shape[1], self._fast.max_len)
+                % (self._fast.max_len, width, self._fast.max_len)
             )
 
         def run(enabled=None):
@@ -1293,20 +1400,33 @@ class Agent(HookRegistry):
             # retry. A disabled gate never enters torch.autocast at all. `enabled=False`
             # retries one request in full precision without reading the agent's AMP flag.
             if enabled is None:
-                enabled = self._amp_enabled_for(b["input_ids"].shape[0])
+                enabled = self._amp_enabled_for(rows)
             dims = independent_dims() if self._compiled else nullcontext()
             graph_outputs = self._reduce_overhead and self._fast is None and self.device.type == "cuda"
             step = cuda_graph_step() if graph_outputs else nullcontext()
             with _amp_context(self.device, self.dtype, enabled), dims, step:
-                out = self.model(
-                    b["input_ids"].to(self.device),
-                    b["attention_mask"].to(self.device),
-                    b["marker_pos"].to(self.device),
-                    b["marker_mask"].to(self.device),
-                    b["qtype"].to(self.device),
-                    **({"position_ids": b["position_ids"].to(self.device),
-                        "option_ids": b["option_ids"].to(self.device)} if "option_ids" in b else {}),
-                )
+                if "inputs_embeds" in b:
+                    # Vision: the visual block is already spliced into the token embeddings and
+                    # the position ids separate the two blocks (laya.vision).
+                    out = self.model(
+                        None,
+                        b["attention_mask"].to(self.device),
+                        b["marker_pos"].to(self.device),
+                        b["marker_mask"].to(self.device),
+                        b["qtype"].to(self.device),
+                        position_ids=b["position_ids"].to(self.device),
+                        inputs_embeds=b["inputs_embeds"].to(self.device),
+                    )
+                else:
+                    out = self.model(
+                        b["input_ids"].to(self.device),
+                        b["attention_mask"].to(self.device),
+                        b["marker_pos"].to(self.device),
+                        b["marker_mask"].to(self.device),
+                        b["qtype"].to(self.device),
+                        **({"position_ids": b["position_ids"].to(self.device),
+                            "option_ids": b["option_ids"].to(self.device)} if "option_ids" in b else {}),
+                    )
                 # CUDA graph outputs belong to a reusable pool; callers can retain our copies.
                 return tuple(t.clone() for t in out) if graph_outputs else out
 
@@ -1592,7 +1712,12 @@ class Agent(HookRegistry):
                                 indices = order[offset:offset + chunk]
                                 per_state_items = [encoded[i] for i in indices]
 
-                                b = collate_items(per_state_items, self.tok.pad_token_id)
+                                if any("visual" in it for item in per_state_items for it in item):
+                                    b = collate_visual(
+                                        [it for item in per_state_items for it in item],
+                                        self._token_embeddings, self.tok.pad_token_id)
+                                else:
+                                    b = collate_items(per_state_items, self.tok.pad_token_id)
                                 logits, act = self._forward(b)
                                 att = b["attention_mask"]
 

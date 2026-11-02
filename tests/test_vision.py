@@ -389,6 +389,22 @@ def test_type_vector_is_learnable_and_applied_after_the_linear():
     assert torch.allclose(after - before, torch.ones(1, 4, 16)), "type vector not applied"
 
 
+def test_encoder_normalises_pixels_the_way_the_tower_was_trained():
+    """[0,1] pixels must arrive at the tower as (x - 0.5) / 0.5, not raw."""
+    seen = []
+
+    class _Spy(_StubTower):
+        def __call__(self, pixel_values):
+            seen.append((round(pixel_values.min().item(), 3), round(pixel_values.max().item(), 3)))
+            return _StubTower.__call__(self, pixel_values)
+
+    v = parse_vision({"vision": {"n_visual_tokens": 4}})
+    enc = build_vision_encoder(v, hidden_size=16, tower=_Spy())
+    enc.encode(torch.zeros(1, 3, 224, 224))
+    enc.encode(torch.ones(1, 3, 224, 224))
+    assert seen == [(-1.0, -1.0), (1.0, 1.0)], seen
+
+
 def test_encoder_produces_the_plan_sized_block():
     v = parse_vision({"vision": {"n_visual_tokens": 8}})
     enc = build_vision_encoder(v, hidden_size=16, tower=_StubTower())
@@ -469,6 +485,152 @@ def test_a_vision_encoder_feeds_the_decision_model_end_to_end():
     assert tuple(logits.shape) == (1, 2), logits.shape
 
 
+# -- an Agent that can see ----------------------------------------------------------------
+
+def _vision_agent():
+    """A tiny Agent built without a checkpoint, with a stub tower.
+
+    `Agent.__new__` skips the disk/weights path while keeping every attribute the vision code
+    touches, so this exercises the real `_encode_state` -> `collate_visual` -> `_infer` plumbing
+    on CPU with no checkpoint and no tower download.
+    """
+    from laya.agent import Agent
+    from laya.common import build_sequence as _bs  # noqa: F401  (import kept for parity)
+
+    model = _tiny_model()
+    agent = Agent.__new__(Agent)
+    agent.model = model
+    agent.device = torch.device("cpu")
+    agent.dtype = torch.float32
+    agent.amp_enabled = False
+    agent._fast = None
+    agent._compiled = False
+    agent._reduce_overhead = False
+    agent._amp_failures = 0
+    agent.cpu_fallback_count = 0
+    agent.last_fallback_reason = None
+    agent.parallel_options = False
+    agent.tok = _stub_tokenizer()
+    agent.cfg = {"max_len": 512, "head_max_len": 192}
+    agent.model_id = "test-vision"
+    agent.temperature = [1.0, 1.0, 1.0]
+    agent.temperature_by_options = {}
+    agent.lang_temperatures = {}
+    agent.binning_map = None
+    from laya.vision import VisionConfig, VisualCache
+    agent.vision = VisionConfig({"n_visual_tokens": 4, "summary_for_options_over": 0})
+    agent._visual_cache = VisualCache(8)
+    agent.vision_encoder = build_vision_encoder(
+        agent.vision, hidden_size=model.encoder.config.hidden_size, tower=_StubTower())
+    agent.vision_encoder.eval()
+    return agent
+
+
+class _StubTok:
+    mask_token = "[M]"
+    mask_token_id = 2
+    sep_token_id = 3
+    cls_token_id = 1
+    pad_token_id = 0
+
+    def __call__(self, text, **kw):
+        text = text if isinstance(text, str) else " ".join(map(str, text))
+        ids = [min(49, 4 + (ord(c) % 40)) for c in text][:64] or [4]
+        return {"input_ids": ids}
+
+    def encode(self, text, **kw):
+        return self(text)["input_ids"]
+
+    def __getitem__(self, k):
+        return self.__dict__[k]
+
+
+def _stub_tokenizer():
+    return _StubTok()
+
+
+def test_agent_runs_a_state_without_an_image():
+    agent = _vision_agent()
+    items = agent._encode_state("plain text state", ["q"],
+                                {"q": agent._to_internal(
+                                    {"type": "choice", "instructions": "pick",
+                                     "criteria": ["a", "b"]})})
+    assert "visual" not in items[0], "a text state must not grow a visual block"
+    assert items[0]["ids"], "text state still tokenizes"
+
+
+def test_agent_attaches_a_visual_block_and_shifts_nothing_else():
+    agent = _vision_agent()
+    internal = {"q": agent._to_internal(
+        {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]})}
+    text_items = agent._encode_state("state", ["q"], internal)
+    img_items = agent._encode_state({"text": "state", "image": {"pixels": torch.zeros(3, 224, 224)}},
+                                    ["q"], internal)
+    assert "visual" in img_items[0]
+    assert tuple(img_items[0]["visual"].shape) == (4, agent.model.encoder.config.hidden_size)
+    assert img_items[0]["plan"].n_visual == 4
+    assert img_items[0]["markers"] == text_items[0]["markers"], "no summary token -> markers hold"
+
+
+def test_the_tower_runs_once_for_many_questions_on_one_image():
+    agent = _vision_agent()
+    internal = {q: agent._to_internal({"type": "choice", "instructions": "pick",
+                                       "criteria": ["a", "b"]}) for q in ("q1", "q2", "q3")}
+    before = agent._visual_cache.misses
+    agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q1", "q2", "q3"], internal)
+    assert agent._visual_cache.misses - before == 1, "one image, one tower pass (spec 4.6)"
+    agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q1"], internal)
+    assert agent._visual_cache.hits == 1, "the same pixels must hit the cache"
+
+
+def test_visual_collate_builds_inputs_embeds():
+    agent = _vision_agent()
+    internal = {"qa": agent._to_internal({"type": "choice", "instructions": "pick",
+                                          "criteria": ["a", "b"]}),
+                "qb": agent._to_internal({"type": "choice", "instructions": "pick",
+                                          "criteria": ["a", "b", "c"]})}
+    items = agent._encode_state({"text": "hello", "image": {"pixels": torch.zeros(3, 224, 224)}},
+                                ["qa", "qb"], internal)
+    from laya.vision import collate_visual
+    b = collate_visual(items, agent._token_embeddings, agent.tok.pad_token_id)
+    n_vis = items[0]["plan"].n_visual
+    assert "inputs_embeds" in b and "input_ids" not in b
+    assert b["inputs_embeds"].shape[0] == 2
+    assert b["inputs_embeds"].shape[1] == max(len(it["ids"]) for it in items) + n_vis
+    # Ragged option counts pad the marker mask, so compare per row rather than asserting all(True).
+    per_row = [int(m.sum()) for m in b["marker_mask"]]
+    assert per_row == [len(it["markers"]) for it in items], per_row
+    assert b["attention_mask"].sum() <= b["attention_mask"].numel()
+
+
+def test_the_batch_forward_runs_and_answers():
+    agent = _vision_agent()
+    internal = {"q": agent._to_internal({"type": "choice", "instructions": "pick",
+                                         "criteria": ["a", "b"]})}
+    items = agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q"], internal)
+    from laya.vision import collate_visual
+    b = collate_visual(items, agent._token_embeddings, agent.tok.pad_token_id)
+    with torch.no_grad():
+        logits, act = agent._infer(b)
+    assert tuple(logits.shape) == (1, 2), logits.shape
+    assert act.shape[0] == 1
+
+
+def test_a_vision_checkpoint_refuses_the_fast_backend_message():
+    """The guard lives in Agent.__init__; assert the message a caller would see."""
+    import inspect
+    from laya import agent as agent_mod
+    src = inspect.getsource(agent_mod.Agent.__init__)
+    assert "cannot use fast=True" in src, "the fast path has no visual-token support"
+
+
+def test_split_state_keeps_the_other_keys_as_data():
+    from laya.vision import split_state
+    text, spec = split_state({"image": "x.png", "vendor": "acme"})
+    assert spec == "x.png"
+    assert text == {"vendor": "acme"}, "non-image keys are still state"
+
+
 if __name__ == "__main__":
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -495,9 +657,17 @@ if __name__ == "__main__":
     test_projector_passthrough_keeps_every_patch()
     test_projector_emits_a_varied_pattern_not_a_constant()
     test_type_vector_is_learnable_and_applied_after_the_linear()
+    test_encoder_normalises_pixels_the_way_the_tower_was_trained()
     test_encoder_produces_the_plan_sized_block()
     test_encoder_gradient_reaches_the_projector_not_the_tower()
     test_encoder_train_eval_toggles_the_tower()
     test_truncating_a_tower_validates_the_layer_count()
     test_a_vision_encoder_feeds_the_decision_model_end_to_end()
+    test_agent_runs_a_state_without_an_image()
+    test_agent_attaches_a_visual_block_and_shifts_nothing_else()
+    test_the_tower_runs_once_for_many_questions_on_one_image()
+    test_visual_collate_builds_inputs_embeds()
+    test_the_batch_forward_runs_and_answers()
+    test_a_vision_checkpoint_refuses_the_fast_backend_message()
+    test_split_state_keeps_the_other_keys_as_data()
     print("all vision foundation tests passed")
