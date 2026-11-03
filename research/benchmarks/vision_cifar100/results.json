@@ -1,0 +1,113 @@
+{
+  "benchmark": "cifar100-as-choice",
+  "measured": "2026-11-03",
+  "split": {
+    "train": 10000,
+    "held_out": 5000,
+    "per_class_train": 100,
+    "per_class_eval": 50
+  },
+  "note": "Every arm scored on the identical held-out rows. Laya numbers come from the saved checkpoint via eval_cifar.py, never from laya-train's console report, which disagreed with the artifact (0.033 against 0.873).",
+  "chance": {
+    "100_way": 0.01,
+    "20_way": 0.05
+  },
+  "hundred_way": {
+    "centroid": {
+      "accuracy": 0.0468,
+      "parameters": 300
+    },
+    "siglip2_zero_shot": {
+      "accuracy": 0.7364,
+      "ece": 0.063,
+      "mean_confidence": 0.6734,
+      "accuracy_at_70pct_coverage": 0.8917,
+      "flip_rate": 0.0
+    },
+    "linear_probe": {
+      "accuracy": 0.7954,
+      "parameters": 76900,
+      "ece": 0.1551,
+      "accuracy_at_70pct_coverage": 0.9351,
+      "flip_rate": 0.0
+    },
+    "laya": {
+      "accuracy": 0.0102,
+      "ece": 0.0008,
+      "mean_confidence": 0.011,
+      "items": 5000,
+      "gate1_image_ablation": {
+        "with_image": 0.01,
+        "without_image": 0.01,
+        "gain": 0.0,
+        "passed": false,
+        "items": 500
+      },
+      "gate2b_option_order": {
+        "flip_rate": 0.752,
+        "items": 500,
+        "passed": false
+      },
+      "verdict": "collapsed to the uniform prior in four configurations (16/64 visual tokens, frozen/trainable encoder)"
+    }
+  },
+  "twenty_way": {
+    "siglip2_zero_shot": {
+      "accuracy": 0.575,
+      "mean_confidence": 0.5767,
+      "ece": 0.0129,
+      "coverage_80": 0.6573,
+      "coverage_50": 0.8008
+    },
+    "linear_probe": {
+      "accuracy": 0.8444,
+      "mean_confidence": 0.9734,
+      "ece": 0.129,
+      "coverage_80": 0.9357,
+      "coverage_50": 0.9868
+    },
+    "laya": {
+      "accuracy": 0.8728,
+      "ece": 0.0184,
+      "mean_confidence": 0.8889,
+      "items": 5000,
+      "risk_coverage": {
+        "100%": 0.8728,
+        "90%": 0.9256,
+        "80%": 0.9623,
+        "70%": 0.9803,
+        "50%": 0.9936,
+        "30%": 0.9987
+      },
+      "gate1_image_ablation": {
+        "with_image": 0.873,
+        "without_image": 0.054,
+        "gain": 0.819,
+        "threshold": 0.35,
+        "passed": true,
+        "items": 1000
+      },
+      "gate2b_option_order": {
+        "flip_rate": 0.169,
+        "flips": 169,
+        "items": 1000,
+        "passed": false
+      },
+      "checkpoint": "10k items, 4 epochs, frozen tower + frozen encoder, 16 visual tokens, joint layout"
+    }
+  },
+  "parameters": {
+    "text_encoder_frozen": 394781696,
+    "vision_tower_frozen": 92884224,
+    "trained": 27300614
+  },
+  "defects_found": [
+    "visual_plan promises one more visual token than PooledProjector emits above summary_for_options_over (96 rendered option tokens), so a >~30-option vision head cannot be built",
+    "that summary token, when enabled, shifts every marker by +1 while _cat inserts the block after all of them: 0/100 markers land on a [MASK] token",
+    "Agent.predict_batch raises KeyError: 'visual' on a batch that mixes an image state with a text-only one (laya/vision.py collate_visual), which makes a batched gate-1 ablation impossible"
+  ],
+  "caveats": [
+    "single seed except the 20-way x 64-visual-token check (collapsed at seed 31, learned at seed 77)",
+    "predict_batch timing on image states was inconsistent across configurations; not investigated"
+  ]
+}

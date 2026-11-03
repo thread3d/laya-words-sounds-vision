@@ -91,6 +91,9 @@ site/
 .ruff_cache/
 research/*_benchmark_results.json
 
+# vision CIFAR-100 benchmark: parquet, PNGs, SigLIP2 weights, checkpoints
+.vision-cifar100/
+
 # local checkpoint weights, kept out of the tree
 # (fetch them with: python verify/checkpoints.py --fetch)
 models/
