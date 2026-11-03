@@ -760,14 +760,22 @@ def update_budget_message(n_train: int, config: TrainConfig) -> str:
 
 
 def _embedding_lookup(model):
-    """The encoder's own *pre-norm* token embedding, the space a visual block joins."""
+    """The encoder's own *pre-norm* token embedding, the space a visual block joins.
+
+    The lookup is bound to a **CPU** copy of the table, deliberately. Batches are assembled on the
+    CPU and moved to the device once per step (`_forward`), so a lookup that reached a GPU table
+    would either raise on CPU token ids or force a device round trip per row. Gradients do not
+    flow through here anyway: `inputs_embeds` bypasses the encoder's embedding layer by design, so
+    the table is a constant either way.
+    """
     enc = getattr(model, "encoder", None) or getattr(model, "_orig_mod", None)
     if enc is not None and not hasattr(enc, "embeddings"):
         enc = getattr(enc, "encoder", enc)
     table = getattr(getattr(enc, "embeddings", None), "tok_embeddings", None)
     if table is None:
         table = enc.embeddings.word_embeddings
-    return lambda ids: table(ids)
+    weight = table.weight.detach().to("cpu")
+    return lambda ids: torch.nn.functional.embedding(ids, weight)
 
 
 def _visual_encoder_fn(encoder):
@@ -778,10 +786,15 @@ def _visual_encoder_fn(encoder):
     projecting here -- once, before the loop, under `no_grad` -- would leave it out of the graph
     and the checkpoint would ship a projector that had never learned anything. `_project_visual`
     runs it inside the step instead.
+
+    The result is cached on the **CPU** even when the tower runs on a GPU. It is one buffer per
+    item for the whole run (196x768 fp16 is 300 KB), so a 150k-item probe would need 45 GB of
+    device memory -- more than this machine has -- while the CPU has 251 GB. The per-step cost of
+    moving a batch's patches back is one transfer, and `_project_visual` puts them on the device.
     """
     def encode(pixels):
         with torch.no_grad():
-            return encoder.encode_patches(pixels.unsqueeze(0))[0]
+            return encoder.encode_patches(pixels.unsqueeze(0))[0].detach().to("cpu")
     return encode
 
 
@@ -790,8 +803,9 @@ def _project_visual(item, projector):
     patches = item.get("visual_patches")
     if patches is None:
         return item
+    device = next(iter(projector.parameters())).device
     projected = dict(item)
-    projected["visual"] = projector(patches.unsqueeze(0))[0]
+    projected["visual"] = projector(patches.unsqueeze(0).to(device))[0]
     return projected
 
 
@@ -1329,6 +1343,12 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         model.vision_encoder = encoder
         projector = encoder.projector
         embed_fn = _embedding_lookup(model)
+        # The tower has to be on `dev` *before* the items are built, because building them is
+        # what encodes every image (`_visual_encoder_fn`). `VisionEncoder` is not an `nn.Module`,
+        # so the `model.to(dev)` above cannot reach it, and nothing else moves the tower: without
+        # this line a GPU run encodes the whole dataset on the CPU and merely looks like a slow
+        # GPU run. Measured here at 2 images/s, versus hundreds once the tower is on the card.
+        encoder.to(dev)
         encode_visual = _visual_encoder_fn(encoder)
         print("vision checkpoint: tower %s, %d visual tokens, modality dropout %g"
               % (vision.tower, vision.n_visual_tokens, config.modality_dropout), flush=True)

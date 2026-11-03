@@ -360,6 +360,10 @@ class VisionEncoder:
     one, and it is the only place that imports a vision architecture.
     """
 
+    #: Where the tower and projector live, set by :meth:`to`. ``None`` (the default) leaves input
+    #: tensors untouched, which is the CPU path every caller had before devices entered the story.
+    device = None
+
     def __init__(self, tower, projector: PooledProjector, config: VisionConfig):
         self.tower = tower
         self.projector = projector
@@ -372,6 +376,25 @@ class VisionEncoder:
     def eval(self):
         return self.train(False)
 
+    def to(self, device):
+        """Move the tower *and* the projector to `device`.
+
+        `VisionEncoder` is deliberately not an `nn.Module` (the tower is injected and the
+        projector is trained on its own), so `DecisionModel.to(device)` reaches neither half:
+        `vision_encoder` is a plain attribute, and the projector lives beside the model. A caller
+        that only moves the model therefore leaves the frozen tower on the CPU, which does not
+        fail -- it just encodes every image ~100x slower while the trainer reports a GPU run.
+        That was measured here at 2 images/s, and this method is the fix.
+
+        Recording the device here also lets :meth:`encode_patches` place the pixels, which is what
+        makes a CPU-decoded image safe to hand to a GPU tower.
+        """
+        torch = _torch()
+        self.tower.to(device)
+        self.projector.to(device)
+        self.device = torch.device(device) if device is not None else None
+        return self
+
     def encode_patches(self, pixel_values):
         """``[B, 3, H, W]`` -> the tower's patch tokens ``[B, N, C]``, unprojected.
 
@@ -381,6 +404,11 @@ class VisionEncoder:
         wants.
         """
         torch = _torch()
+        if self.device is not None:
+            # A decoded image is a CPU tensor; the tower is wherever `to()` put it. Moving it here
+            # rather than at each call site is the same rule the projector already follows, and it
+            # is what keeps a GPU checkpoint from raising on its own inputs.
+            pixel_values = pixel_values.to(self.device)
         normalised = (pixel_values - self.config.pixel_mean) / self.config.pixel_std
         with torch.no_grad() if not self._tower_trains() else _nullcontext():
             out = self.tower(pixel_values=normalised)
@@ -393,20 +421,12 @@ class VisionEncoder:
     def encode(self, pixel_values):
         """``[B, 3, H, W]`` pixels in [0, 1] -> ``[B, n_visual_tokens, hidden]`` embeddings.
 
-        Pixel normalisation happens here rather than in `load_pixels`, because it belongs to the
-        tower: SigLIP's processor rescales 1/255 and then maps [0, 1] through (x - mean) / std with
+        Pixel normalisation happens in :meth:`encode_patches`, because it belongs to the tower:
+        SigLIP's processor rescales 1/255 and then maps [0, 1] through (x - mean) / std with
         0.5/0.5, so a caller handing over raw [0, 1] pixels would otherwise feed the tower values it
         was never trained on. Both constants are config fields so a different tower can move them.
         """
-        torch = _torch()
-        pixel_values = (pixel_values - self.config.pixel_mean) / self.config.pixel_std
-        with torch.no_grad() if not self._tower_trains() else _nullcontext():
-            out = self.tower(pixel_values=pixel_values)
-        patches = getattr(out, "last_hidden_state", None)
-        if patches is None:
-            raise TypeError("the vision tower must return `last_hidden_state` patch tokens; "
-                            "got %s" % type(out).__name__)
-        return self.projector(patches)
+        return self.projector(self.encode_patches(pixel_values))
 
     def _tower_trains(self) -> bool:
         for p in self.tower.parameters():
@@ -747,31 +767,36 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
     width = max(len(it["ids"]) for it in items) + n_visual
     k_max = max(len(it["markers"]) for it in items)
     hidden = items[0]["visual"].size(-1)
+    # The block is spliced from the same device the visual half arrived on: a trained projector
+    # emits on its own device (a GPU), while `embed_fn` is a CPU lookup because batches are built
+    # here, on the CPU. Allocating the batch where the block already is makes `torch.cat`
+    # legal without a per-row round trip, and `_forward`'s `.to(device)` stays a no-op for it.
+    device = items[0]["visual"].device
 
-    embeds = torch.zeros(len(items), width, hidden)
-    att = torch.zeros(len(items), width, dtype=torch.long)
-    pos = torch.zeros(len(items), width, dtype=torch.long)
-    mpos = torch.zeros(len(items), k_max, dtype=torch.long)
-    mmask = torch.zeros(len(items), k_max, dtype=torch.bool)
+    embeds = torch.zeros(len(items), width, hidden, device=device)
+    att = torch.zeros(len(items), width, dtype=torch.long, device=device)
+    pos = torch.zeros(len(items), width, dtype=torch.long, device=device)
+    mpos = torch.zeros(len(items), k_max, dtype=torch.long, device=device)
+    mmask = torch.zeros(len(items), k_max, dtype=torch.bool, device=device)
     # Which positions hold the visual block, for a checkpoint with an attention readout. The
     # readout asks "which tokens are the picture", and nothing else in the batch says.
-    vmask = torch.zeros(len(items), width, dtype=torch.bool)
+    vmask = torch.zeros(len(items), width, dtype=torch.bool, device=device)
     # Training batches carry a target; inference batches do not. Mirrors `collate_items`, including
     # its refusal of a target longer than the row's own marker count.
     has_target = any("target" in it for it in items)
-    target = torch.zeros(len(items), k_max, dtype=torch.float32) if has_target else None
+    target = torch.zeros(len(items), k_max, dtype=torch.float32, device=device) if has_target else None
 
     for i, it in enumerate(items):
         ids = it["ids"]
-        tok = embed_fn(torch.tensor(ids, dtype=torch.long))
+        tok = embed_fn(torch.tensor(ids, dtype=torch.long)).to(device)
         row = assemble_inputs_embeds(tok.unsqueeze(0), it["visual"].unsqueeze(0), it["plan"])[0]
         n = row.size(0)
         embeds[i, :n] = row
         att[i, :n] = 1
-        pos[i, :n] = torch.tensor(it["plan"].position_ids, dtype=torch.long)
+        pos[i, :n] = torch.tensor(it["plan"].position_ids, dtype=torch.long, device=device)
         vmask[i, it["plan"].splice:it["plan"].splice + n_visual] = True
         k = len(it["markers"])
-        mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long)
+        mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long, device=device)
         mmask[i, :k] = True
         if has_target and "target" in it:
             t = it["target"]
@@ -779,14 +804,14 @@ def collate_visual(items, embed_fn, pad_id: int = 0):
                 raise ValueError(
                     "collate_visual: item %d has %d target entries but only %d marker positions; "
                     "a target needs one entry per option" % (i, len(t), k))
-            target[i, :len(t)] = torch.tensor([float(v) for v in t], dtype=torch.float32)
+            target[i, :len(t)] = torch.tensor([float(v) for v in t], dtype=torch.float32, device=device)
     out = {
         "inputs_embeds": embeds,
         "attention_mask": att,
         "position_ids": pos,
         "marker_pos": mpos,
         "marker_mask": mmask,
-        "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long),
+        "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long, device=device),
         "visual_mask": vmask,
     }
     if target is not None:

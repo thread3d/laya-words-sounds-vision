@@ -15,7 +15,7 @@ from transformers import AutoConfig, AutoModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from laya.common import DecisionModel
-from laya.vision import (PooledProjector, VisionConfig, assemble_inputs_embeds,
+from laya.vision import (PooledProjector, VisionConfig, VisionEncoder, assemble_inputs_embeds,
                          build_vision_encoder, parse_vision, visual_plan)
 
 
@@ -376,6 +376,28 @@ class _StubTower:
 
     def eval(self):
         self.trained = False
+
+    def to(self, device):
+        self.moved_to = str(device)
+        return self
+
+
+def test_encoder_to_moves_the_tower_as_well_as_the_projector():
+    """`VisionEncoder.to` is the only thing that can move the tower.
+
+    Regression, measured on a GPU: `finetune` moved the decision model and the projector but not
+    the tower, because `VisionEncoder` is not an `nn.Module` and `model.vision_encoder` is a plain
+    attribute. Nothing failed -- the run simply encoded every image on the CPU (~2 images/s) while
+    reporting a GPU device. The tower must therefore follow the requested device, and so must the
+    projector, or a checkpoint ships half its trainable weights in the wrong place.
+    """
+    tower = _StubTower()
+    enc = VisionEncoder(tower, PooledProjector(32, 16, 4), parse_vision({"vision": {}}))
+    moved = enc.to("cpu")
+    assert moved is enc, "to() must return the encoder for chaining"
+    assert getattr(tower, "moved_to", None) == "cpu", getattr(tower, "moved_to", None)
+    for parameter in enc.projector.parameters():
+        assert parameter.device.type == "cpu", parameter.device
 
 
 def test_projector_compresses_and_projects():
@@ -1241,6 +1263,7 @@ if __name__ == "__main__":
     test_post_norm_embeddings_do_not_reproduce_the_input_ids_path()
     test_parallel_layout_refuses_inputs_embeds()
     test_a_spliced_visual_block_changes_the_option_logits()
+    test_encoder_to_moves_the_tower_as_well_as_the_projector()
     test_projector_compresses_and_projects()
     test_projector_passthrough_keeps_every_patch()
     test_projector_emits_a_varied_pattern_not_a_constant()

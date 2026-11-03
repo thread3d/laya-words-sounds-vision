@@ -1265,6 +1265,12 @@ class Agent(HookRegistry):
             # vision but ships none is refused here rather than answering from noise.
             load_vision_weights(self.vision_encoder, getattr(self, "model_dir", "") or ".",
                                 dtype=self.dtype if self.device.type != "cuda" else None)
+            # `DecisionModel.to(device)` cannot reach the tower: `vision_encoder` is a plain
+            # attribute of a holder that is not an `nn.Module`. Without this a GPU agent keeps a
+            # CPU tower and raises on its own decoded pixels -- the same defect that made GPU
+            # training encode every image on the CPU. `to()` also records the device, so
+            # `encode_patches` places the pixels for us.
+            self.vision_encoder.to(self.device)
             self.vision_encoder.eval()
         pixels = load_pixels(image_spec, self.vision.image_size)
         encoder = self.vision_encoder
