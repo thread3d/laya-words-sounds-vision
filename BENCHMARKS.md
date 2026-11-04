@@ -401,7 +401,7 @@ An independent study measured `laya` as a dynamically batched service on a froze
 SAM.gov notices. Each request asked the same three typed questions, so the table reports decisions per second
 (three decisions per request) at the highest tested load that met both the latency SLO and the achieved-rate gate.
 The study pinned Laya to
-[`6a58191`](https://github.com/NandhaKishorM/laya/commit/6a5819129eb220570792e417e49723d697efd76f)
+[`6a58191`](https://github.com/thread3d/laya-words-sounds-vision/commit/6a5819129eb220570792e417e49723d697efd76f)
 and recorded the checkpoint hashes, software versions and GPU environments. Sweep rows, parity counts, the replay
 summary and the environments: `research/results/nvidia_capacity_20260925.json`. Sweep and replay script:
 `research/scripts/bench_nvidia_capacity.py`.

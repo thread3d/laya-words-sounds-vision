@@ -1,7 +1,7 @@
 # Laya for .NET
 
 **Laya's System 1 decision engine for .NET.** This is a .NET port of the
-[Laya Python SDK](https://github.com/NandhaKishorM/laya/blob/main/README.md) (the `laya` package on PyPI, from this repository). It reproduces
+[Laya Python SDK](https://github.com/thread3d/laya-words-sounds-vision/blob/main/README.md) (the `laya` package on PyPI, from this repository). It reproduces
 the Python inference path (the same tokenization, sequence building, calibration and answers),
 verified against golden outputs recorded from the Python code (`tests/Laya.Tests/golden`), but
 runs on [ONNX Runtime](https://onnxruntime.ai/) instead of PyTorch, so **no Python process runs
@@ -17,7 +17,7 @@ hallucinate.
 | Package | **[`Laya.Onnx`](https://www.nuget.org/packages/Laya.Onnx) 0.1.0** (namespace `Laya`), versioned separately from the Python package |
 | Target | **.NET 10** (`net10.0`) |
 | Checkpoints | **multilingual** (`mmBERT-base`, 322M, 1024-token, 100+ languages), **english** (`ModernBERT-large`, 421M, 512-token, English-optimized), **typed-decisions** (`ModernBERT-large`, 421M, 1024-token, fine-tuned on four typed-decisions workflows). Default is `multilingual`. |
-| Model format | **ONNX** (opset 18, weights in an external-data sidecar), exported from the official PyTorch checkpoints with [`tools/export_onnx.py`](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/tools/export_onnx.py). See [MODELS.md](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/MODELS.md). |
+| Model format | **ONNX** (opset 18, weights in an external-data sidecar), exported from the official PyTorch checkpoints with [`tools/export_onnx.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/tools/export_onnx.py). See [MODELS.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/MODELS.md). |
 | Runtime | `Microsoft.ML.OnnxRuntime` 1.30 (CPU by default; CUDA and DirectML execution providers with the matching ORT package) |
 | Tokenizer | [`Tokenizers.DotNet`](https://www.nuget.org/packages/Tokenizers.DotNet), a binding to the same Rust HuggingFace `tokenizers` library Python uses. Its token streams match Python's because it runs the same code, not a reimplementation. |
 | Native RIDs | `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` |
@@ -84,7 +84,7 @@ The engine auto-detects which layout a directory holds — nothing in the API as
 one. Point it at a checkpoint directory with `LayaEngine.FromDirectory(...)`,
 `LayaOptions.ModelDirectory` or `LAYA_ONNX_ROOT`, as in the [Quickstart](#quickstart).
 
-See [MODELS.md](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/MODELS.md) for exporting the ONNX model step by step (both layouts), where the
+See [MODELS.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/MODELS.md) for exporting the ONNX model step by step (both layouts), where the
 engine looks for it, and downloading.
 
 ---
@@ -136,7 +136,7 @@ var hindi = engine.Predict(
 Console.WriteLine(hindi["department"].AsChoice());               // billing (0.995 confidence)
 ```
 
-The runnable version of this code is in [`samples/Laya.Sample`](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/samples/Laya.Sample/README.md):
+The runnable version of this code is in [`samples/Laya.Sample`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/samples/Laya.Sample/README.md):
 
 ```bash
 dotnet run --project samples/Laya.Sample -- --model-dir "<artifact dir>"
@@ -685,7 +685,7 @@ The container disposes the singleton when the host shuts down.
 
 ## Routing, language detection, email and shortlist
 
-Runnable end-to-end example: [`samples/Laya.Routing`](https://github.com/NandhaKishorM/laya/tree/main/laya-dotnet/samples/Laya.Routing).
+Runnable end-to-end example: [`samples/Laya.Routing`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-dotnet/samples/Laya.Routing).
 
 **Language detection** — no model, no network:
 
@@ -753,7 +753,7 @@ Python's `laya.Agent`.
 
 | Member | Description |
 |---|---|
-| `static LayaEngine Create(LayaOptions? options = null)` | Finds the artifacts (see [resolution order](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/MODELS.md#5-where-the-engine-looks)), loads the config, and builds the ONNX session and tokenizer. May download if `AllowDownload` is set. |
+| `static LayaEngine Create(LayaOptions? options = null)` | Finds the artifacts (see [resolution order](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/MODELS.md#5-where-the-engine-looks)), loads the config, and builds the ONNX session and tokenizer. May download if `AllowDownload` is set. |
 | `static LayaEngine FromDirectory(string directory)` | Shorthand for `Create(new LayaOptions { ModelDirectory = directory })`. |
 | `LayaResult Predict(object? state, QuestionSet questions)` | Answers every question about `state` in a single batched inference call. See [Supplying state](#supplying-state). |
 | `LayaResult PredictLong(object state, QuestionSet questions, int? window = null, int? stride = null, string aggregate = "auto", int? batchSize = null)` | Scans overlapping token windows. See [Long prediction](#long-prediction). |
@@ -1037,7 +1037,7 @@ had already gone stale independent of the split layout. Re-run the count yoursel
 number is expected to keep moving as coverage grows.
 
 The parity vectors in `tests/Laya.Tests/golden/<checkpoint>/` are recorded by
-[`tools/dump_golden.py`](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/tools/dump_golden.py) `--checkpoint all`, which runs the **real** `laya.Agent.system_one` over the
+[`tools/dump_golden.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/tools/dump_golden.py) `--checkpoint all`, which runs the **real** `laya.Agent.system_one` over the
 same ONNX graph. The vectors come from the shipping Python code, not from a second implementation.
 The same golden answers back both the fused and the split parity theories: the split graph is the
 fused graph cut into two ONNX files, not a different model, so one recording serves both.

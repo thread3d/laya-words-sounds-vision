@@ -114,7 +114,7 @@ in the repository is computed on, which is why the threshold reads it rather tha
 all (`temperature: [1.0, 1.0, 1.0]`, empty `temperature_by_options`), and english's `choice:11+` is
 refused by the loader's own clamp with a warning that says to treat it as uncalibrated. Fit and
 validate any threshold on held-out data at the option counts your workload uses -- see the
-README's [Calibration](https://github.com/NandhaKishorM/laya#calibration) section.
+README's [Calibration](https://github.com/thread3d/laya-words-sounds-vision#calibration) section.
 
 ---
 

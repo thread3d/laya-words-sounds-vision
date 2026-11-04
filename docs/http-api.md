@@ -6,7 +6,7 @@ keep working: Laya's `predict()` output is already schema-compatible, and the se
 HTTP surface: single and batch inference, a routing snapshot, a health probe, an optional bearer
 check and request limits.
 
-The [Python HTTP client](https://github.com/NandhaKishorM/laya/blob/main/sdk/python/README.md)
+The [Python HTTP client](https://github.com/thread3d/laya-words-sounds-vision/blob/main/sdk/python/README.md)
 provides synchronous `predict` and `health` calls with no runtime dependencies. Install it
 from `sdk/python` in the application environment to keep the inference stack on the server.
 
@@ -582,4 +582,4 @@ README's self-hosting section -- and every check above applies to it as it does 
 admission, size limits, body-control validation and `500` mapping. A state that does not fit
 the token room is truncated the same way, and a batch with any truncated result logs one
 warning for the call. The `laya` CLI and MCP server cover local use -- see the
-[README](https://github.com/NandhaKishorM/laya#readme).
+[README](https://github.com/thread3d/laya-words-sounds-vision#readme).

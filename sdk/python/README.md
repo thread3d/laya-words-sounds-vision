@@ -17,7 +17,7 @@ This uses setuptools to build the package. The installed SDK has no runtime
 dependencies and supports Python 3.10–3.13.
 
 Run the server in a **separate environment** using the existing
-[self-hosting instructions](https://github.com/NandhaKishorM/laya#self-hosting-http-server-jev-compatible).
+[self-hosting instructions](https://github.com/thread3d/laya-words-sounds-vision#self-hosting-http-server-jev-compatible).
 Installing `laya[serve]` in the application environment would install inference
 dependencies again.
 
@@ -51,7 +51,7 @@ except LayaTimeoutError:
 `predict(state, questions, *, model=None, task=None, lang=None, lang_guess=None,
 max_len=None, head_max_len=None, min_confidence=None, timeout=None)` calls
 `POST /v1/systemone`. State is text, a JSON object, or an array; questions use
-the existing [HTTP contract](https://github.com/NandhaKishorM/laya/blob/main/docs/http-api.md).
+the existing [HTTP contract](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/http-api.md).
 Choice, score and noul answers are returned as ordinary dictionaries. Types are
 available in `laya_client.types`.
 

@@ -10,14 +10,14 @@ From the repository root:
 docker compose run --build --rm laya
 ```
 
-This builds the checkout, runs the [sample request](https://github.com/NandhaKishorM/laya/blob/main/examples/docker/request.json)
+This builds the checkout, runs the [sample request](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/docker/request.json)
 on CPU and prints JSON covering `choice`, `score` and `noul`. The first request
 downloads the selected public Hugging Face checkpoint; no account is needed.
 Allow several minutes for its first download.
 Weights stay in a named volume. Subsequent runs use `docker compose run --rm laya`.
 
 Predictions and confidence still need evaluation on your workload. See the
-[benchmark limits](https://github.com/NandhaKishorM/laya/blob/main/BENCHMARKS.md).
+[benchmark limits](https://github.com/thread3d/laya-words-sounds-vision/blob/main/BENCHMARKS.md).
 
 For ARM64 hosts, DGX Spark and Apple Silicon, see
 [ARM64 and DGX Spark containers](docker-platforms.md).
@@ -110,7 +110,7 @@ docker compose run --rm --volume "$PWD/request.json:/inputs/request.json:ro" \
 ```
 
 For a commented configuration with request, checkpoint and secret-file mounts,
-see [`compose.example.yml`](https://github.com/NandhaKishorM/laya/blob/main/compose.example.yml):
+see [`compose.example.yml`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/compose.example.yml):
 
 ```bash
 docker compose -f compose.yaml -f compose.example.yml run --build --rm laya
@@ -141,7 +141,7 @@ checkpoints need no token.
 ## Fine-tuned checkpoints
 
 This image runs inference. Fine-tuning happens outside it — the
-[fine-tuning notebook](https://github.com/NandhaKishorM/laya/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb)
+[fine-tuning notebook](https://github.com/thread3d/laya-words-sounds-vision/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb)
 runs the whole loop on Kaggle's free 2xT4 GPUs and exports a checkpoint this image can
 serve. Background and open questions about the training interface stay in
 [#4](https://github.com/NandhaKishorM/laya/issues/4) and
@@ -197,7 +197,7 @@ same Compose files and the same `LAYA_CACHE_VOLUME`, or `LAYA_CACHE_VOLUME=<name
 for a fresh one. With `HF_HUB_OFFLINE=1` a missing or divergent ref is a load
 failure with no network to fall back to, but the prerequisite is the same.
 
-[`docker/prefetch_modelscope.py`](https://github.com/NandhaKishorM/laya/blob/main/docker/prefetch_modelscope.py)
+[`docker/prefetch_modelscope.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docker/prefetch_modelscope.py)
 lists the repository on modelscope.cn, downloads the checkpoint's own files -- the
 same set `laya/agent.py` asks the Hub for, so no sibling checkpoint is pulled -- and
 writes them into the image's hub cache the way `snapshot_download` lays out a

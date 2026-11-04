@@ -14,8 +14,8 @@ changes the answer.
 ## Start here
 
 Install Laya and make a first decision with the README's
-[Installation](https://github.com/NandhaKishorM/laya#installation) and
-[Quickstart](https://github.com/NandhaKishorM/laya#quickstart). They stay in the README so there
+[Installation](https://github.com/thread3d/laya-words-sounds-vision#installation) and
+[Quickstart](https://github.com/thread3d/laya-words-sounds-vision#quickstart). They stay in the README so there
 is one copy to keep current.
 
 ## Find a guide
@@ -31,11 +31,11 @@ is one copy to keep current.
 | call Laya over HTTP from a client written against the Jev wire protocol | [HTTP API](http-api.md) |
 | run the SDK or the `laya-serve` HTTP API in a container, on CPU or an NVIDIA GPU | [Docker quickstart](docker.md) |
 | build for ARM64 hosts or DGX Spark | [ARM64 and DGX Spark containers](docker-platforms.md) |
-| specialise a checkpoint for your own decisions | [Browser-agent fine-tuning example](finetune_browser_agent.md) and the [fine-tuning notebook](https://github.com/NandhaKishorM/laya/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb) |
+| specialise a checkpoint for your own decisions | [Browser-agent fine-tuning example](finetune_browser_agent.md) and the [fine-tuning notebook](https://github.com/thread3d/laya-words-sounds-vision/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb) |
 | answer questions about a picture, or teach a checkpoint to look at one | [Vision fine-tuning](finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture) and [the measured results](vision-benchmark-results.md) |
 | judge benchmark results and deployment limits | [Benchmarks and known limits](benchmarks.md) |
 | look up a class, function or parameter | [Python API reference](reference/index.md) |
 | score a labelled dataset, compare to a baseline, or gate a build on it | [Evaluation harness](evals.md) |
 
 Confidence gating is in the
-[README](https://github.com/NandhaKishorM/laya#automated-confidence-gating) for now.
+[README](https://github.com/thread3d/laya-words-sounds-vision#automated-confidence-gating) for now.

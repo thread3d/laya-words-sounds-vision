@@ -23,7 +23,7 @@ We appreciate the efforts of security researchers and operators who help keep La
 ### Reporting Channels
 
 1. **GitHub Private Vulnerability Reporting (Preferred)**:
-   Submit an encrypted disclosure via [GitHub Security Advisories](https://github.com/NandhaKishorM/laya/security/advisories/new). This enables private, end-to-end coordinated patching with the maintainers before publication.
+   Submit an encrypted disclosure via [GitHub Security Advisories](https://github.com/thread3d/laya-words-sounds-vision/security/advisories/new). This enables private, end-to-end coordinated patching with the maintainers before publication.
 
 2. **Direct Maintainer Contact**:
    If private vulnerability reporting is unavailable or you prefer direct contact, email maintainer Nandakishor M at:

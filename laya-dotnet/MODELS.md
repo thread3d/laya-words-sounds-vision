@@ -1,6 +1,6 @@
 # Laya Models: Obtaining the ONNX Artifacts
 
-The Laya .NET SDK ([README](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/README.md)), a .NET port of the Laya Python SDK, runs
+The Laya .NET SDK ([README](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/README.md)), a .NET port of the Laya Python SDK, runs
 **ONNX** models through ONNX Runtime, not PyTorch weights, so no Python process is needed at runtime. This
 guide explains how to get those ONNX artifacts: either convert them yourself
 from the published PyTorch checkpoints (works today), or let the SDK download
@@ -406,7 +406,7 @@ per shape, and now per layout. That theory-row count is not a fixed constant —
 a checkpoint's golden-answer coverage or shape sweep grows, and again once split-layout artifacts
 exist for a checkpoint — so treat any specific figure quoted here as a snapshot, not a target.
 The 0.1.0 snapshot of the full count (all three checkpoints, both layouts, everything present)
-is kept in one place, [README.md § Tests](https://github.com/NandhaKishorM/laya/blob/main/laya-dotnet/README.md#tests), rather than restated here. Re-derive it
+is kept in one place, [README.md § Tests](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-dotnet/README.md#tests), rather than restated here. Re-derive it
 yourself with `dotnet test --solution laya-dotnet/Laya.slnx -c Release` (all artifacts present),
 or with the `-class-` exclusions that section lists for the model-backed classes if you need the
 true count without loading any weights.

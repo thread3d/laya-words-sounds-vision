@@ -89,8 +89,12 @@ python -m compileall -q laya/ tests/
 
 ## Documentation
 
-The site at [nandhakishorm.github.io/laya](https://nandhakishorm.github.io/laya/) builds from
-`docs/` with Zensical, and its API reference builds from the docstrings in `laya/`. A new page
+The documentation in [`docs/`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs) builds
+with Zensical, and its API reference builds from the docstrings in `laya/`.
+
+Links in these pages point at this repository. The exception is a `#123`-style citation: it names an
+issue or pull request from before the move, which lives in the upstream tracker, so the link goes
+there rather than to a number this repository does not have. A new page
 appears under Guides without a config change; to put it somewhere else, add it to
 [`docs/.nav.yml`](docs/.nav.yml). For a docs or docstring change, build the site the way the CI
 does:

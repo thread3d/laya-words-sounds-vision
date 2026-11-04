@@ -217,7 +217,7 @@ are deliberately kept out of the repository.
 NVIDIA driver 615.71.09, 16,376 MiB VRAM. Checkpoint: `convaiinnovations/laya`,
 `multilingual` subdirectory at revision `1c5edc17a7acd8701df6fc341c0d179f1c62c982`.
 The baseline is main `fa9a2a7`. Full machine snapshots and unrounded measurements are in
-[`aoti_multilingual_rtx4070.json`](https://github.com/NandhaKishorM/laya/blob/main/benchmarks/results/aoti_multilingual_rtx4070.json).
+[`aoti_multilingual_rtx4070.json`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/benchmarks/results/aoti_multilingual_rtx4070.json).
 
 | Measurement | Before | After |
 |---|---:|---:|

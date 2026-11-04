@@ -19,8 +19,8 @@
 //! **fused** (a single `model.onnx` + `model.onnx.data`, the layout `tools/export_onnx.py`
 //! produces) or **split** (`encoder.onnx` + `head.onnx`, the layout laya-ts's exporter produces).
 //! [`model_artifacts::ModelLayout`] and [`model_artifacts::ModelPaths`] report which one was
-//! found and resolved. See the crate [README](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/README.md#getting-the-model)
-//! and [MODELS.md](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/MODELS.md#4-output-layout)
+//! found and resolved. See the crate [README](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/README.md#getting-the-model)
+//! and [MODELS.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/MODELS.md#4-output-layout)
 //! for the full directory layouts.
 //!
 //! ## Design notes

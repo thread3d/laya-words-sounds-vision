@@ -86,8 +86,8 @@ that block is `null`. Calibration method and owner are the application's to reco
 [Evaluation harness](evals.md) for the run identity and the comparability check between a baseline
 and a candidate.
 
-The README's [Automated Confidence Gating](https://github.com/NandhaKishorM/laya#automated-confidence-gating),
-[Calibration](https://github.com/NandhaKishorM/laya#calibration), and [Honest limits](https://github.com/NandhaKishorM/laya#honest-limits) sections
+The README's [Automated Confidence Gating](https://github.com/thread3d/laya-words-sounds-vision#automated-confidence-gating),
+[Calibration](https://github.com/thread3d/laya-words-sounds-vision#calibration), and [Honest limits](https://github.com/thread3d/laya-words-sounds-vision#honest-limits) sections
 give the existing calibration and confidence context. Keep irreversible or high-cost actions behind
 an explicit review boundary even when their confidence is high.
 
@@ -156,7 +156,7 @@ real request
   between a baseline and a candidate.
 - [Hook API reference](hooks/api.md) — `PredictContext` fields and lifecycle events.
 - [Tracing](hooks/tracing.md) — `run_id` and span correlation.
-- [README: Automated Confidence Gating](https://github.com/NandhaKishorM/laya#automated-confidence-gating) — confidence is a
+- [README: Automated Confidence Gating](https://github.com/thread3d/laya-words-sounds-vision#automated-confidence-gating) — confidence is a
   policy input, not a correctness guarantee.
-- [README: Calibration](https://github.com/NandhaKishorM/laya#calibration) and [Honest limits](https://github.com/NandhaKishorM/laya#honest-limits).
+- [README: Calibration](https://github.com/thread3d/laya-words-sounds-vision#calibration) and [Honest limits](https://github.com/thread3d/laya-words-sounds-vision#honest-limits).
 

@@ -168,7 +168,7 @@ type so the choice is explicit rather than implied.
 **A threshold is a policy, not a property of the model.** Both checkpoints ship over-confident,
 and how over-confident depends on the option count, so a number measured on a 3-option question
 does not transfer to a 20-option one. Measure it on your own data; the Calibration section of
-[`BENCHMARKS.md`](https://github.com/NandhaKishorM/laya/blob/main/BENCHMARKS.md) has the fitting
+[`BENCHMARKS.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/BENCHMARKS.md) has the fitting
 loop and the fitted values.
 
 ### `action` and `act_probability`

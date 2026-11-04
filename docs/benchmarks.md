@@ -1,9 +1,9 @@
 # Benchmarks and known limits
 
 Laya's results depend on the checkpoint, task, question wording, option count and hardware. Use
-the [full benchmark tables](https://github.com/NandhaKishorM/laya/blob/main/BENCHMARKS.md)
+the [full benchmark tables](https://github.com/thread3d/laya-words-sounds-vision/blob/main/BENCHMARKS.md)
 to find a comparable run before choosing a checkpoint or a confidence threshold. The
-[research directory](https://github.com/NandhaKishorM/laya/tree/main/research) holds the scripts
+[research directory](https://github.com/thread3d/laya-words-sounds-vision/tree/main/research) holds the scripts
 and result files behind the main tables.
 
 The vision path's real-data benchmark has its own recipe next to the code it measures: the
@@ -25,7 +25,7 @@ those tables cite.
 The published Jev figures alongside the original Laya suites come from third-party studies
 with different prompts and sample sizes. They are useful context, but are not a controlled
 head-to-head run. See the comparison notes in
-[`research/README.md`](https://github.com/NandhaKishorM/laya/blob/main/research/README.md).
+[`research/README.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/research/README.md).
 
 Read accuracy together with the baseline and data split. For example, the typed-decisions
 benchmark reports 0.766 accuracy for the fine-tuned checkpoint, while both base checkpoints
@@ -67,19 +67,19 @@ or option count.
   labels instead of the state. Check alternate option orders and wording, especially when a wrong
   decision is costly.
 - **Long documents:** The multilingual encoder can read up to 8,192 tokens when configured for
-  that limit, but the [long-context benchmark](https://github.com/NandhaKishorM/laya/blob/main/research/results/long_context_multilingual.json)
+  that limit, but the [long-context benchmark](https://github.com/thread3d/laya-words-sounds-vision/blob/main/research/results/long_context_multilingual.json)
   reports less reliable answers beyond about 4,000 tokens of preceding text. Measure accuracy at
   the lengths you expect in use.
 - **Latency:** The T4 figures do not predict CPU or cold-load time. Measure warm and cold calls
   with your own checkpoint, device, input lengths and number of questions.
 
-The [README's Honest limits section](https://github.com/NandhaKishorM/laya#honest-limits)
+The [README's Honest limits section](https://github.com/thread3d/laya-words-sounds-vision#honest-limits)
 has examples and current workarounds. The benchmark tables give the dataset and hardware
 behind each of the limits above.
 
 ## Reproduce or extend a result
 
-Start with the [script and result map](https://github.com/NandhaKishorM/laya/blob/main/research/README.md)
+Start with the [script and result map](https://github.com/thread3d/laya-words-sounds-vision/blob/main/research/README.md)
 and the run index at the top of `BENCHMARKS.md`. `research/scripts/bench_local.py` runs the
 51-language CPU sweep, `bench_apps.py` covers application workflows, and
 `bench_latency.py` measures routing and inference speed. The T4 notebook is generated from

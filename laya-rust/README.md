@@ -1,6 +1,6 @@
 # laya (Rust)
 
-Rust port of the [Laya Python SDK](https://github.com/NandhaKishorM/laya/blob/main/README.md) (the `laya` package on PyPI, from this
+Rust port of the [Laya Python SDK](https://github.com/thread3d/laya-words-sounds-vision/blob/main/README.md) (the `laya` package on PyPI, from this
 repository): typed-decision inference over a local ONNX model. It reproduces the Python inference
 path (the same tokenization, sequence building, calibration and answers), verified against golden
 outputs recorded from the Python code (`tests/golden`), but runs on
@@ -10,14 +10,14 @@ You ask typed questions (`choice`, `score`, `noul`) about a piece of state, and 
 in **one non-autoregressive forward pass** with calibrated probabilities. Nothing is generated, so
 there is nothing to parse and nothing to hallucinate.
 
-Mirrors the [Laya Python SDK](https://github.com/NandhaKishorM/laya/blob/main/README.md) module for module — see the
+Mirrors the [Laya Python SDK](https://github.com/thread3d/laya-words-sounds-vision/blob/main/README.md) module for module — see the
 ["Module map"](#module-map) below for the correspondence.
 
 | | |
 |---|---|
 | Crate | [`laya-onnx`](https://crates.io/crates/laya-onnx) 0.1.0 (imported as `laya`), versioned separately from the Python package |
 | Checkpoints | **multilingual** (`mmBERT-base`, 322M, 1024-token, 100+ languages, default), **english** (`ModernBERT-large`, 421M, 512-token, English-optimized), **typed-decisions** (`ModernBERT-large`, 421M, 1024-token, fine-tuned on four typed-decisions workflows) |
-| Model format | **ONNX** (opset 18, weights in an external-data sidecar), exported from the official PyTorch checkpoints with [`tools/export_onnx.py`](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/tools/export_onnx.py). See [MODELS.md](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/MODELS.md). |
+| Model format | **ONNX** (opset 18, weights in an external-data sidecar), exported from the official PyTorch checkpoints with [`tools/export_onnx.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/tools/export_onnx.py). See [MODELS.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/MODELS.md). |
 | Runtime | [ONNX Runtime](https://onnxruntime.ai/) through [`ort`](https://docs.rs/ort) 2.x (CPU by default; `cuda` / `directml` cargo features). No Python process runs at runtime. |
 | Tokenizer | [`tokenizers`](https://docs.rs/tokenizers) — the same HuggingFace Rust `tokenizers` library the Python SDK uses |
 | Download | opt-in, via [`ureq`](https://docs.rs/ureq) (blocking, `rustls`, feature `download`, on by default) |
@@ -64,7 +64,7 @@ or in `Cargo.toml`:
 [dependencies]
 laya-onnx = "0.1.0"
 # or, straight from the repository (cargo finds the `laya-onnx` package in laya-rust/):
-laya-onnx = { git = "https://github.com/NandhaKishorM/laya" }
+laya-onnx = { git = "https://github.com/thread3d/laya-words-sounds-vision" }
 ```
 
 The package is named `laya-onnx`, but the library is imported as **`laya`**: everything lives at
@@ -80,7 +80,7 @@ checkpoint directory holds:
 - **Fused** — a single `model.onnx` graph with its weights in a `model.onnx.data` sidecar beside
   it, plus `rl_agent_config.json` and a nested `tokenizer/` directory
   (`tokenizer/tokenizer.json` + `tokenizer/tokenizer_config.json`). This is what
-  [`tools/export_onnx.py`](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/tools/export_onnx.py) produces.
+  [`tools/export_onnx.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/tools/export_onnx.py) produces.
 - **Split** — `encoder.onnx` (text in, hidden states out) and `head.onnx` (hidden states + marker
   metadata in, logits out) as two separate graphs, plus `rl_agent_config.json` and a root-level
   `tokenizer.json` (no sibling `tokenizer_config.json`). This is the layout laya-ts's exporter
@@ -93,7 +93,7 @@ directory with `LayaEngine::from_directory(...)`, `LayaOptions::model_directory`
 automatically (fused wins if, unusually, a directory has both); `ModelArtifacts::layout()` reports
 which one was found.
 
-See [MODELS.md](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/MODELS.md) for exporting the ONNX model step by step, where the engine looks for it
+See [MODELS.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/MODELS.md) for exporting the ONNX model step by step, where the engine looks for it
 (including the split layout), and downloading.
 
 ---
@@ -625,7 +625,7 @@ for (_id, answer) in result.iter() {
 
 ## Routing, language detection, email and shortlist
 
-Runnable end-to-end example: [`samples/laya-routing`](https://github.com/NandhaKishorM/laya/tree/main/laya-rust/samples/laya-routing).
+Runnable end-to-end example: [`samples/laya-routing`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-rust/samples/laya-routing).
 
 **Language detection** — no model, no network:
 
@@ -725,9 +725,9 @@ cargo test --workspace
 
 | Sample | What it shows |
 |---|---|
-| [`samples/laya-sample`](https://github.com/NandhaKishorM/laya/tree/main/laya-rust/samples/laya-sample) | The quickstart above as a runnable console app: one engine, four typed questions, answered in English then Hindi. Also a parity fixture — see its README's "What it is testing". |
-| [`samples/laya-benchmark`](https://github.com/NandhaKishorM/laya/tree/main/laya-rust/samples/laya-benchmark) | Cold/warm latency, p95, peak memory and an answer snapshot for one checkpoint, as one JSON object — pairs with the Python benchmark. |
-| [`samples/laya-routing`](https://github.com/NandhaKishorM/laya/tree/main/laya-rust/samples/laya-routing) | Language detection, `LayaRouter` (routing decisions and multi-checkpoint predict), email cleaning and the embedding shortlist, in five sections. |
+| [`samples/laya-sample`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-rust/samples/laya-sample) | The quickstart above as a runnable console app: one engine, four typed questions, answered in English then Hindi. Also a parity fixture — see its README's "What it is testing". |
+| [`samples/laya-benchmark`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-rust/samples/laya-benchmark) | Cold/warm latency, p95, peak memory and an answer snapshot for one checkpoint, as one JSON object — pairs with the Python benchmark. |
+| [`samples/laya-routing`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-rust/samples/laya-routing) | Language detection, `LayaRouter` (routing decisions and multi-checkpoint predict), email cleaning and the embedding shortlist, in five sections. |
 
 ```bash
 # from laya-rust/, with the exports in the repository-root onnx/ folder
@@ -757,7 +757,7 @@ The suite has tiers, so it stays useful without the ~1.3 GB artifact:
 | 2 | the full artifact per checkpoint | `predict` against recorded Python answers, plus a shape sweep and a concurrency test |
 
 Golden vectors are read from `tests/golden/<checkpoint>/` (recorded from Python by
-[`tools/dump_golden.py`](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/tools/dump_golden.py)), overridable with `LAYA_GOLDEN_DIR`. ONNX artifacts are found via `LAYA_ONNX_DIR` (multilingual only, legacy) or
+[`tools/dump_golden.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/tools/dump_golden.py)), overridable with `LAYA_GOLDEN_DIR`. ONNX artifacts are found via `LAYA_ONNX_DIR` (multilingual only, legacy) or
 `LAYA_ONNX_ROOT` (parent of all three checkpoint subdirectories), or by walking up from the crate
 root looking for `onnx/<checkpoint>/`. Tests whose artifacts are missing print a `skip:` line and
 return, rather than failing — a machine with no exported checkpoints still gets a green Tier-1 run.

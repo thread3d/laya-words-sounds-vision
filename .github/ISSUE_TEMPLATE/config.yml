@@ -4,5 +4,5 @@ contact_links:
     url: https://nandhakishorm.github.io/laya/
     about: Installation, routing, serving, fine-tuning and prediction hooks.
   - name: README and examples
-    url: https://github.com/NandhaKishorM/laya#readme
+    url: https://github.com/thread3d/laya-words-sounds-vision#readme
     about: Quickstart, benchmarks and usage examples.

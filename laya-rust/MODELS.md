@@ -1,6 +1,6 @@
 # Laya Models: Obtaining the ONNX Artifacts
 
-The Laya Rust SDK ([README](https://github.com/NandhaKishorM/laya/blob/main/laya-rust/README.md)), a Rust port of the Laya Python SDK, runs
+The Laya Rust SDK ([README](https://github.com/thread3d/laya-words-sounds-vision/blob/main/laya-rust/README.md)), a Rust port of the Laya Python SDK, runs
 **ONNX** models through ONNX Runtime, not PyTorch weights, so no Python process is needed at runtime. This
 guide explains how to get those ONNX artifacts: either convert them yourself
 from the published PyTorch checkpoints (works today), or let the SDK download

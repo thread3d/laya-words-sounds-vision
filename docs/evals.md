@@ -135,7 +135,7 @@ teacher generations. An interval containing zero does not establish equivalence.
 Inspect slices and individual decisions for label skew, and use labelled evals
 for correctness or calibration claims.
 
-[`examples/evals/teacher_agreement.py`](https://github.com/NandhaKishorM/laya/blob/main/examples/evals/teacher_agreement.py)
+[`examples/evals/teacher_agreement.py`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/evals/teacher_agreement.py)
 replays two published teacher observations from a pinned public dataset against
 a local Laya checkpoint, saving the three runs and their report. Its small fixed
 sample demonstrates the workflow, not deployment readiness.
@@ -322,7 +322,7 @@ Every row above that takes a confidence (`ece`, `brier`, `aurc`, both `selective
 `answer["answer_confidence"]` -- the probability of the answer being reported, the quantity temperature
 scaling fits. It is not a claim that the number is right as shipped: both base checkpoints are
 over-confident and `laya-multilingual` ships no fitted temperatures at all -- see the README's
-[Calibration](https://github.com/NandhaKishorM/laya#calibration) -- which is what `ece` measures
+[Calibration](https://github.com/thread3d/laya-words-sounds-vision#calibration) -- which is what `ece` measures
 rather than assumes.
 
 An answer that carries no `answer_confidence` falls through, in order, to `confidence`, then

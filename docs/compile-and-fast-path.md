@@ -129,7 +129,7 @@ processes.
 
 Reproduce cold/restart timings, memory, and cache counters with
 `benchmarks/bench_compile_defaults.py`; see
-[the recorded measurements](https://github.com/NandhaKishorM/laya/blob/main/benchmarks/results/compile-defaults/README.md).
+[the recorded measurements](https://github.com/thread3d/laya-words-sounds-vision/blob/main/benchmarks/results/compile-defaults/README.md).
 
 ## AOTInductor
 
