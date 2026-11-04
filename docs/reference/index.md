@@ -12,6 +12,8 @@ for example `from laya import Router`.
   and calibration utilities.
 - [Fine-tuning](train.md): `finetune` and `TrainConfig` from `laya.train`, imported from that
   module rather than the top-level package, and the pieces they are built from.
+- [Vision](vision.md): `laya.vision` — how a state carrying an image is split, what the picture
+  becomes inside the sequence, and how the block is laid out against the option markers.
 - [LangChain components](langchain.md): `LayaRouter`, `LayaGuardrail`, `LayaTriage` and
   `LayaEvaluator`.
 

@@ -18,10 +18,15 @@ Held-out split, 5 000 rows per column, identical rows for every arm. Chance is 1
 | linear probe on the frozen embedding | 79.54 % | 84.44 % |
 | **Laya's vision head** (27.3 M trained) | **1.02 %** | **87.28 %** |
 
-At 20 options Laya beats both controls and is well calibrated (ECE 0.018, gate 1 gain +0.819), but
-**fails gate 2b at 16.9 % option-order flips**. At 100 options the head collapses to the uniform
-prior in four independent configurations. Both facts, and the code-level reason for the second, are
-in `results.json` and the write-up.
+At 20 options in the **joint** layout Laya beats both controls and is well calibrated (ECE 0.018,
+gate 1 gain +0.819), but **fails gate 2b at 16.9 % option-order flips**. The layout the spec says
+ships, `state_conditioned`, passes **both** gates on the same benchmark -- 0.813 held out, gate 1
++0.760, gate 2b **0.0 %** -- at the cost of epochs; `train.sh --layout state_conditioned`.
+
+The 100-way collapse (uniform prior in four independent configurations) has a code-level cause that
+was fixed in v0.4.50 -- the `[VIS_SUMMARY]` token the plan reserved and the projector never emitted,
+plus a marker shift that put 0 of 100 markers on a `[MASK]`. The 100-way accuracy has **not** been
+re-measured since. Everything above is in `results.json` and the write-up.
 
 ## Layout
 
@@ -31,7 +36,7 @@ in `results.json` and the write-up.
 | `make_coarse.py` | the same images with the parquet's `coarse_label`, 20-way |
 | `controls.py` | embeds the data with the frozen tower; zero-shot, linear probe, centroid |
 | `controls_calib.py`, `controls20.py` | the controls on the calibration and risk-coverage axes |
-| `train_cifar.sh`, `train20.sh` | fine-tune through `laya-train` (GPU, unsandboxed) |
+| `train.sh` | fine-tune through `laya-train`: `--dataset 20\|100`, `--layout`, `--visual-tokens`, `--train-rows`, `--seed` (GPU, unsandboxed) |
 | `train_gpu.py` | `laya-train` with this machine's GPU facts applied and `tower_patch` installed |
 | `eval_cifar.py` | accuracy, ECE, risk-coverage, gate 1, gate 2b — from the saved artifact |
 | `tower_patch.py` | MIOpen workaround: the tower's patch-embed conv as im2col + matmul |
@@ -60,14 +65,21 @@ bash -c 'source research/benchmarks/vision_cifar100/gpuenv.sh && \
 python3 research/benchmarks/vision_cifar100/controls_calib.py   # 100-way calibration (CPU)
 python3 research/benchmarks/vision_cifar100/controls20.py       # 20-way calibration
 
-# 4. Laya
-bash research/benchmarks/vision_cifar100/train20.sh \
-     .vision-cifar100/ckpt_cifar20_frozen 4 8 --freeze-encoder
+# 5. Laya: the published 20-way arm, then the layout the spec ships
+PYTHON=python3 bash research/benchmarks/vision_cifar100/train.sh \
+     .vision-cifar100/ckpt_cifar20_frozen 4 8 --dataset 20 --freeze-encoder
+PYTHON=python3 bash research/benchmarks/vision_cifar100/train.sh \
+     .vision-cifar100/ckpt20_sc 10 8 --dataset 20 --layout state_conditioned \
+     --train-rows 2000 --freeze-encoder
 
-# 5. score the artifact (never the trainer's console report)
+# 6. score the artifact, with both gates
 python3 research/benchmarks/vision_cifar100/eval_cifar.py \
         .vision-cifar100/ckpt_cifar20_frozen --data eval20.jsonl --tag _20
 ```
+
+GPU commands need an unsandboxed shell (`bwrap --dev /dev` hides `/dev/kfd`) and an interpreter
+whose torch is a HIP build: `PYTHON=python3`. The repository's `.venv` is the CPU interpreter the
+CI gates use; `gpuenv.sh` says so if the two are mixed up.
 
 `controls.py` needs the SigLIP2 processor and tokenizer files next to the weights: the checkpoint
 the repo already caches ships only `config.json` and `model.safetensors`, so
@@ -77,9 +89,19 @@ with `model.safetensors` symlinked to the cached blob.
 
 ## Cost
 
-One `gfx1030` (Radeon Pro W6800-class, 32 GiB), fp32, micro-batch 8 × grad-accum 2: 10 000 items ×
-3 epochs at 100 options ≈ 34 min, × 4 epochs at 20 options ≈ 18 min, scoring 5 000 held-out rows
-plus both gates ≈ 5 min. The frozen-patch cache is ~0.6 MB per item.
+One `gfx1030` (Radeon Pro W6800-class, 32 GiB), fp32, micro-batch 8 × grad-accum 2:
+
+| run | wall clock |
+|---|---|
+| 10 000 items × 3 epochs, 100 options, joint | ~34 min |
+| 10 000 items × 4 epochs, 20 options, joint | ~18 min |
+| 2 000 items × 10 epochs, 20 options, `state_conditioned` | ~19 min |
+| scoring 5 000 held-out rows + both gates, joint | ~5 min |
+| scoring the same rows + gates, `state_conditioned` | ~30 min |
+
+The frozen-patch cache is ~0.6 MB per item. A `state_conditioned` item is `k` rows rather than one,
+which is why both training epochs and scoring cost more: the sequence is shorter but there are
+twenty times as many of them.
 
 ## What to know before trusting a number here
 

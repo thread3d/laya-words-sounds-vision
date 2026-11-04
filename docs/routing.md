@@ -47,11 +47,16 @@ Routing checks inputs in this order:
 
 1. `model=` selects a checkpoint directly.
 2. `task=` selects a checkpoint for the named task.
-3. If `auto_task_detection=True`, an exact match against one of the known typed-decisions question
+3. A state that carries an image (`image_path`, `image` or `image_base64`) goes to the vision
+   checkpoint named by `vision_model` (default `"vision"`), if such a checkpoint is registered.
+   A text checkpoint cannot see pixels at all, whatever language the text beside them is in, so
+   this rule sits above the language rules — but below `model=` and `task=`, which name a
+   checkpoint and still win.
+4. If `auto_task_detection=True`, an exact match against one of the known typed-decisions question
    ID sets selects `typed-decisions`.
-4. A recognized `lang=` value selects English or multilingual.
-5. A per-call `lang_guess=` or the router's configured `lang_guess` is consulted.
-6. Built-in script and language analysis selects a checkpoint. If there is no reliable language
+5. A recognized `lang=` value selects English or multilingual.
+6. A per-call `lang_guess=` or the router's configured `lang_guess` is consulted.
+7. Built-in script and language analysis selects a checkpoint. If there is no reliable language
    signal, the router uses its configured `default` (multilingual since 0.4.0).
 
 The first matching rule wins. For example, `model="multilingual"` overrides `lang="en"`. Invalid
@@ -306,6 +311,27 @@ other states to the same window. Requests sharing a checkpoint, question schema 
 can share an Agent batch forward pass; a different schema, checkpoint or budget is grouped
 separately, since one Agent batch carries one budget for all its states. `batch_size` limits the
 number of states passed together to the Agent; results still correspond to the request order.
+
+## States that carry an image
+
+A state carrying a picture goes to the vision checkpoint, above every language rule. Register the
+checkpoint once and mixed text-and-image traffic needs no per-call hint:
+
+```python
+router = laya.Router(models={"vision": "./my-vision-checkpoint"}, device="cuda")
+router.predict({"image_path": "shelf.jpg", "text": "what is on the shelf?"}, question)
+router.predict("Le récapitulatif de la réunion.", question)   # still routed by language
+```
+
+The rule fires **only** when `vision_model` names a checkpoint that is actually registered — its
+default value is `"vision"`, so a deployment with no such checkpoint routes exactly as it always
+did, and a text checkpoint never has a state reshaped underneath it. `vision_model=None` switches
+the rule off for a router that does have one.
+
+`laya.vision.has_image(state)` is the predicate the router asks — it builds nothing, so a text
+request never pays for it. See [vision fine-tuning](finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture)
+for how a checkpoint learns to use the picture, and the [vision reference](reference/vision.md) for
+the accepted image forms.
 
 ## Choosing an entry point
 

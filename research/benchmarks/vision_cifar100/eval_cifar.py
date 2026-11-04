@@ -81,6 +81,17 @@ def main():
     import tower_patch  # noqa: E402
     tower_patch.install()
 
+    # `Agent` treats an unavailable CUDA as "fall back to CPU, with a warning", which is right for
+    # a library and wrong for a benchmark: the same command then takes ~16x longer and scores a
+    # slightly different number. `train_gpu.py` refuses for the same reason.
+    if str(args.device).startswith("cuda") and not torch.cuda.is_available():
+        print("eval_cifar: --device %s, but no CUDA/HIP device is visible "
+              "(torch.cuda.device_count() == 0).\n"
+              "            bwrap's `--dev /dev` hides /dev/kfd, so GPU work runs unsandboxed;\n"
+              "            pass --device cpu explicitly to score on the CPU." % args.device,
+              file=sys.stderr)
+        return 3
+
     from laya import Agent  # noqa: E402
     from laya.evals_vision import strip_image  # noqa: E402
 
@@ -182,4 +193,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

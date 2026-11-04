@@ -571,15 +571,32 @@ Two reasons to hold this loosely: **no published T4 measurement exists for any o
 (§5), and one published T4 ViT attempt found INT8 *slower* than fp16, so the quantization escape hatch
 is not available if these numbers come in badly.
 
-**The measurement that replaces this table is a new one — it does not exist yet.** The repo's
-`research/scripts/bench_latency.py` measures the *text* checkpoint and the router; it cannot see a
-vision tower, so it will only confirm the text half. The tower half needs a **batch-1 fp16 T4 sweep of
-the two or three finalists** (SigLIP2-B/16, PE-Core-B16-224, and C-RADIOv4-SO400M at 224), recorded in
-the same JSON shape as the existing benchmarks. **This is the single highest-value hour in the
-project**: it converts every latency claim in this document from a model-derived estimate into a
-measurement, it decides the tower, and it costs less than a day. Do it before writing any training
-code — the survey's own closing recommendation is the same one: *"the first engineering task should be
-a batch-1 fp16 T4 sweep of the two or three finalists, not more reading."*
+**The sweep has since been run — on the cards this machine has, which are not T4s.** Batch 1, fp16,
+one image, `research/benchmarks/vision_cifar100/`'s environment:
+
+| tower | `gfx1030` | `gfx906` | ratio to the text encoder @512 | T4 (still model-derived) |
+|---|---|---|---|---|
+| ModernBERT-large, 192 tokens (baseline) | 31.4 ms | 33.4 ms | 1.00× | 32.8 ms p50 |
+| ModernBERT-large, 512 tokens | 42.8 ms | 69.1 ms | — | — |
+| siglip2-base-p16-224, full | **11.6 ms** | 12.5 ms | **0.27×** | ~8 ms |
+| siglip2-base-p16-224, `keep_layers=6` | **6.1 ms** | 6.7 ms | — | — |
+| siglip2-so400m-p14-384, full | 64.0 ms | 102.6 ms | **1.49×** | ~131 ms |
+| siglip2-so400m-p14-384, `keep_layers=6` | 15.1 ms | 24.7 ms | — | — |
+
+Two conclusions this document's earlier arithmetic got wrong, both because it leaned on CPU
+measurements:
+
+* **so400m is not 4× the text encoder, it is 1.5×.** The CPU ratio was distorted by ModernBERT being
+  unusually slow per token there; the §4.4 "base only" conclusion rests on that artefact and should
+  be re-decided on this table.
+* **truncation is worth 2× on base and 4× on so400m**, far more than the CPU-measured 25 % / 48 % —
+  and the prior that intermediate layers are also *better* features makes it free.
+
+What is still missing is the T4 column: the numbers above are AMD cards, and the ratio to the text
+encoder is the portable quantity across architectures (it held to within 0.09 while the absolute
+baseline moved 2×). A T4 sweep would replace the estimates in the last column only.
+`PE-Core-B16-224` could not be resolved in this checkout at all (`.pt`-only weights, empty
+`config.yaml`), which is a packaging cost of choosing it.
 
 **If Tier L misses its budget, the fallback is an encoder swap, not a redesign.** In priority order:
 (1) cut `NV` from 64 to 32 — the 267.9 MMAC/token arithmetic says this is the cheapest win available;

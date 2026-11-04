@@ -59,7 +59,7 @@ not a hand-typed mapping — giving 10 000 / 5 000 items over 20 classes.
 |---|---|
 | `cifar_prep.py` / `make_coarse.py` | parquet → PNGs + Laya JSONL (100-way / 20-way) |
 | `controls.py`, `controls_calib.py`, `controls20.py` | zero-shot, linear probe, centroid; calibration and risk-coverage |
-| `train_cifar.sh`, `train20.sh`, `train_cifar64.sh`, `train20_64.sh` | training through `laya-train` |
+| `train.sh` | training through `laya-train`: `--dataset 20\|100`, `--layout`, `--visual-tokens`, `--train-rows`, `--seed` |
 | `eval_cifar.py` | accuracy, ECE, risk–coverage, gate 1, gate 2b, from the saved artifact |
 | `gpuenv.sh` | `LD_LIBRARY_PATH` for `libcaffe2_nvrtc.so`, `HSA_OVERRIDE_GFX_VERSION` unset |
 
@@ -158,7 +158,9 @@ chance, which is what they exist to do.
 
 ---
 
-## 4. Mechanism: the `[VIS_SUMMARY]` token is not implemented, and its marker math is wrong
+## 4. Mechanism: the `[VIS_SUMMARY]` token was not implemented, and its marker math was wrong
+
+*(Both fixed in v0.4.50 — the section is kept as the measurement that found them, and it says at the end what changed.)*
 
 The spec anticipated this failure and prescribes the fix. `docs/vision-decision-system.md` §4.1:
 
@@ -322,9 +324,13 @@ Two other things this session could not settle, both recorded rather than papere
   (1.25 s/item against 57 ms) and faster in another (28 ms/item against 57 ms). Worth its own look;
   not investigated here.
 * The trainer's own console report disagreed with the artifact again — for `ckpt_cifar20_frozen` it
-  printed **accuracy 0.0333** where the artifact measures **0.8728**. This is the open defect
-  the vision ledger R8 records ("the report scores different weights"). Every number in this
-  document comes from `eval_cifar.py` against the saved checkpoint, never from that report.
+  printed **accuracy 0.0333** where the artifact measures **0.8728**. **Fixed since (v0.4.47).**
+  It was two defects, both silent: the `--eval` rows were built without the image (so the table
+  scored the state text alone, and chance is exactly what those rows score), and `finetune` never
+  loaded the base checkpoint's projector, so `laya-train --base <vision checkpoint>` restarted from
+  a random one and scored *that*. With both fixed, the "Before" row for a checkpoint that measures
+  0.7822 reads **0.7900**. Every number in this document was measured before that fix and comes
+  from `eval_cifar.py` against the saved checkpoint, never from the report.
 
 ---
 
@@ -388,10 +394,14 @@ python3 "$BENCH/controls_calib.py"                                # 100-way cali
 python3 "$BENCH/controls20.py"                                    # 20-way calibration (CPU)
 
 # 4. Laya, frozen tower and frozen text encoder
-bash "$BENCH/train_cifar.sh" "$DATA/ckpt_cifar_frozen"   3 8 --freeze-encoder
-bash "$BENCH/train20.sh"     "$DATA/ckpt_cifar20_frozen" 4 8 --freeze-encoder
+PYTHON=python3 bash "$BENCH/train.sh" "$DATA/ckpt_cifar_frozen"   3 8 --dataset 100 --freeze-encoder
+PYTHON=python3 bash "$BENCH/train.sh" "$DATA/ckpt_cifar20_frozen" 4 8 --dataset 20  --freeze-encoder
 
-# 5. score the artifact, with both gates (never the trainer's console report)
+# 4b. the layout comparison in §4.5 -- one flag, and ~10 epochs because an item is k rows
+PYTHON=python3 bash "$BENCH/train.sh" "$DATA/ckpt20_sc_2k_10ep" 10 8 --dataset 20 \
+    --layout state_conditioned --train-rows 2000 --freeze-encoder
+
+# 5. score the artifact, with both gates
 python3 "$BENCH/eval_cifar.py" "$DATA/ckpt_cifar20_frozen" --data eval20.jsonl --tag _20
 python3 "$BENCH/eval_cifar.py" "$DATA/ckpt_cifar_frozen"   --tag _100
 ```

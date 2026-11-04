@@ -5,6 +5,7 @@ nav:
   - router.md
   - helpers.md
   - train.md
+  - vision.md
   - langchain.md
   - glob: "*"
     ignore_no_matches: true

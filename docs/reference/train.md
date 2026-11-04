@@ -30,6 +30,8 @@ re-exported from the top-level package. `laya-train` is its command line. The
 
 ::: laya.train.items_from_rows
 
+::: laya.train.eval_items_from_rows
+
 ::: laya.train.target_from_gold
 
 ::: laya.train.target_from_expected
@@ -55,5 +57,7 @@ re-exported from the top-level package. `laya-train` is its command line. The
 ::: laya.train.resolve_checkpoint_dir
 
 ::: laya.train.load_checkpoint
+
+::: laya.train.attach_projector
 
 ::: laya.train.save_checkpoint

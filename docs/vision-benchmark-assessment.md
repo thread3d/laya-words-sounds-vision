@@ -5,22 +5,35 @@ Companion to the session ledger (not in this tree). Every number below is either
 (a) quoted from a primary source fetched today, (b) taken from the ledger's recorded
 measurement, or (c) measured fresh in this session and marked **[measured here]**.
 
-> **Superseded in part — same day.** §4 asked for a real-data run; it was then done. See
-> `vision-benchmark-results.md` for CIFAR-100 measured end to end. The short version: at
-> **20 options** Laya's head is the best arm on the ladder (**87.28 %**, ECE 0.018, gate 1 gain
-> +0.819) but **fails gate 2b at 16.9 % flips**; at **100 options** it collapses to the uniform
-> prior (1.02 %), and the reason is a documented-but-unimplemented `[VIS_SUMMARY]` token. The
-> "unrankable" verdict below is therefore obsolete in the 20-way direction and confirmed in the
-> 100-way direction.
+> **Superseded — read `vision-benchmark-results.md` first.** §4 asked for a real-data run; it was
+> done, on CIFAR-100, end to end. Two rounds of it changed the answer to the question in this
+> document's title:
+>
+> * **20 options, joint layout:** Laya's head is the best arm on the ladder — **87.28 %**, ECE
+>   0.018, gate 1 gain +0.819 — but **fails gate 2b at 16.9 % flips**, so it is not shippable.
+> * **20 options, `state_conditioned`** (the layout the spec says ships): **81.30 %**, gate 1
+>   **+0.760** and gate 2b **0.0 %** — the first artifact in this project that passes **both**
+>   gates on a public dataset. The cost is epochs, not accuracy ceiling
+>   (`vision-benchmark-results.md` §4.5).
+> * **100 options:** the head collapsed to the uniform prior (1.02 %) in four configurations,
+>   because `[VIS_SUMMARY]` was documented and never implemented. That is **fixed in v0.4.50**,
+>   including the marker arithmetic that put 0 of 100 markers on a `[MASK]`; the 100-way accuracy
+>   has not been re-measured since.
+>
+> So the verdict below is obsolete where it says "unrankable": there is now a measured,
+> gate-passing result at 20 options. It still stands for anything above ~30 options until that
+> re-run exists.
 
 ---
 
 ## 0. The short answer
 
-There is **no public benchmark result for Laya's vision system**, because the object it
-builds — a typed multiple-choice decision head over an image, one forward pass, no
-generation — is not the object any public benchmark scores. The question therefore
-decomposes into three separable claims, and only the first is externally checkable:
+At the time of writing there was **no public benchmark result for Laya's vision system**,
+because the object it builds — a typed multiple-choice decision head over an image, one forward
+pass, no generation — is not the object any public benchmark scores. There is one now: CIFAR-100
+as a 20-option `choice` question, with the three controls that make the number mean something
+(`vision-benchmark-results.md`). What follows is how the question decomposes, and which of its
+claims a public benchmark can check at all:
 
 | layer | externally comparable? | verdict |
 |---|---|---|
@@ -185,20 +198,28 @@ beyond its training distribution.*
 
 ## 5. Bottom line
 
-*(Revised after the CIFAR-100 run — see `vision-benchmark-results.md`.)*
+*(Revised twice: after the CIFAR-100 run, and again after the layout comparison and the
+`[VIS_SUMMARY]` fix. Numbers from `vision-benchmark-results.md`.)*
 
-* **As a vision model at low cardinality, it is good and now measured**: 87.28 % on 20-way
-  CIFAR-100 held out, above a frozen linear probe (84.44 %) and the tower's own zero-shot head
-  (57.50 %), with ECE 0.018 and gate 1 passing at a gain of +0.819.
-* **As a vision model at high cardinality, it does not work yet**: 1.02 % against a 1 % chance at
-  100 options, in four independent configurations, because the `[VIS_SUMMARY]` token that §4.1 of
-  the spec relies on was never implemented (and its marker arithmetic is wrong even if it were).
-* **Its own order-invariance gate fails on real data**: 16.9 % flips at 20 options, against the
-  8-10 % published figure the gate exists to beat. The 0.0 % in the ledger was the
-  `state_conditioned` layout on a four-colour toy.
+* **As a vision model at low cardinality, it is good and measured, and the layout decides whether
+  it is shippable.** The joint layout reaches 87.28 % on 20-way CIFAR-100 held out — above a frozen
+  linear probe (84.44 %) and the tower's own zero-shot head (57.50 %) — but flips 16.9 % of its
+  answers when the option list is reordered. `state_conditioned`, the layout the spec says ships,
+  reaches **81.30 %** with gate 1 at **+0.760** and gate 2b at **0.0 %**: both gates pass, which no
+  earlier checkpoint in this project managed on real data.
+* **The price is epochs, not accuracy ceiling**: a `state_conditioned` item is `k` rows, so it
+  needs roughly three times the epochs to reach the same accuracy and costs about five times as
+  much to score. Whether it closes the remaining ~6-point gap to the 10 000-item joint run with more
+  data is untested.
+* **As a vision model at high cardinality, it does not work yet — and the reason is now fixed but
+  not re-measured.** The head collapsed to the uniform prior (1.02 % against a 1 % chance) in four
+  configurations because `[VIS_SUMMARY]` was never implemented, and because the plan shifted every
+  marker by one for an insertion that never happens (0 of 100 markers landed on a `[MASK]`). Both
+  are fixed in v0.4.50; a 100-option checkpoint now trains, and its accuracy has not been taken.
 * **As an architecture**, the latency story is unchanged and confirmed: one deterministic forward
   pass, ~43 ms, with the head's sequence length — not the tower — dominating the cost.
 
-Quote the 87.28 % with the 16.9 % flip rate and the 20-option scope attached; do not quote it as a
-general vision number.
+Quote the 20-option numbers with the layout and the epoch budget attached: 87.28 % is the joint
+layout at 10 000 items, 81.30 % is `state_conditioned` at 2 000 items and 10 epochs, and neither is
+a general vision number. Above ~30 options there is still nothing to quote.
 

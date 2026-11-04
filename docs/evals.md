@@ -637,6 +637,12 @@ The report gives accuracy on both sides per tag slice and the drop between them.
 makes it a verdict — the run exits non-zero unless accuracy falls by at least `X` when the pixels
 are taken away.
 
+Both passes go through one `predict_batch`, image states and text-only states in the same batch.
+That is what `Agent.predict_batch` is for, and it is why the ablation is cheap: a mixed batch is
+one forward pass per pair rather than a tower pass per row. (Before v0.4.48 the mixed batch raised
+`KeyError: 'visual'`, so every gate number in the vision write-up had to be measured one state per
+forward pass.)
+
 A model that barely notices is the documented default failure of multimodal fusion: the encoder
 learns to answer from the text and the image becomes decoration. Accuracy alone cannot see that,
 which is why this is a blocking gate rather than a metric.
@@ -661,8 +667,13 @@ gives the flip rate overall and per tag. `--max-flip-rate X` makes it a verdict.
 
 This catches a model that scores options *against each other* instead of against the image: its
 answer follows position, so a caller who reorders a list — which carries no information — gets a
-different decision. A state-conditioned design reaches zero; the published figure for joint
-candidate encoding is 8–10%.
+different decision. The published figure for joint candidate encoding is 8–10%.
+
+Measured here, on 20-way CIFAR-100 with the same data, seed and epoch budget: the joint
+(`sequential`) layout flips **28.3 %**, and `state_conditioned` flips **0.0 %** (0 of 1 000
+permutations), which is the layout's whole reason for existing. `state_conditioned` pays for it in
+epochs — one row sees one option instead of all of them — so budget three times the epochs to
+reach the same accuracy. `docs/vision-benchmark-results.md` §4.5 has the table.
 
 Answers stay keyed by the original criteria, so a flip is a changed label, not a re-indexed one.
 Questions with fewer than two options are passed through unpermuted, `--seed` makes the

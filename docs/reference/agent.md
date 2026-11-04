@@ -13,6 +13,39 @@ both are `HookRegistry`s, but only `Agent` holds a PyTorch model, so
 
 ::: laya.onnx_agent.ONNXAgent
 
+## States that carry an image
+
+A state can be a picture, and a checkpoint trained with `--vision` reads it:
+
+```python
+agent = laya.load("./my-vision-checkpoint")
+answer = agent.predict({"image_path": "photo.png", "text": "what is on the shelf?"}, question)
+```
+
+`image_path`, `image` (PNG/JPEG/GIF/WebP bytes, base64, or already-decoded `pixels`) and
+`image_base64` are the accepted forms; `laya.vision.split_state` is the reference, and the text
+half is optional, because a picture on its own is the evidence. `laya.Router` sends a state that
+carries an image to the vision checkpoint when one is configured, so a mixed workload does not
+need to pick the model by hand.
+
+`predict_batch` accepts a list that **mixes** image states and text-only states. Every row is its
+own sequence, so a text row in a vision batch is simply not spliced; the picture is encoded once
+per distinct image per call (`laya.vision.VisualCache`, keyed on the normalised pixels), so asking
+five questions about one photograph costs one tower pass. Before v0.4.48 the mixed batch raised
+`KeyError: 'visual'`, which also made a batched image-ablation gate impossible.
+
+Two backends cannot run a visual batch, and both refuse rather than mis-answer: `fast=True` (the
+TileLang path is built for the five sequential inputs) and `compile=` (the compiled path pads and
+re-shapes `input_ids`, which a visual block does not have). Load a vision checkpoint with the eager
+backend.
+
+A text checkpoint is unaffected by all of this: with no `vision` block in its config the state is
+serialized as it always was, byte for byte, so an image reference in the state becomes text it was
+never trained to read rather than a silent shape change.
+
+To export a vision checkpoint, `scripts/export_onnx.py` writes two graphs — the tower, then the
+decision model over `inputs_embeds` — and `laya-evals onnx` checks them against the eager path.
+
 ## Quantized export
 
 `scripts/export_onnx.py --quantize` writes an INT8 weight-only quantized copy beside the fp32

@@ -1,37 +1,45 @@
 #!/bin/bash
-# Train Laya's vision head on CIFAR-100, from a source checkout, on a GPU.
+# Train Laya's vision head on CIFAR-100, from this checkout, on a GPU.
 #
-#   bash benchmarks/cifar100/train.sh OUT EPOCHS MICRO_BATCH [options] [laya-train flags...]
+#   bash train.sh OUT EPOCHS MICRO_BATCH [options] [laya-train flags...]
 #
 # Options consumed here, with their defaults:
 #   --dataset 20|100     coarse (20-option) or fine (100-option) split          [20]
 #   --layout NAME        sequential | parallel | state_conditioned              [sequential]
 #   --visual-tokens N    n_visual_tokens in the vision block                    [16]
-#   --summary-over N     summary_for_options_over                               [default]
+#   --summary-over N     summary_for_options_over (default: the checkpoint's own)
 #   --seed N             training seed                                          [31]
+#   --train-rows N       train on a class-balanced stride of the split          [all]
 #
-# Anything else is forwarded to `laya-train`, so `--freeze-encoder`, the learning rates and a
+# Everything else is forwarded to `laya-train`, so `--freeze-encoder`, the learning rates and a
 # larger `--max-len` all reach it. Our own defaults are emitted first, so a forwarded flag wins.
 #
-# `summary_for_options_over` is left at its default unless asked: at 20 options that is the
-# intended path, while at 100 options the default currently *refuses* (`plan expects 17 visual
-# tokens, got 16` -- the [VIS_SUMMARY] token is not implemented), so a 100-way run passes
-# `--summary-over 0` until it is.
+# `--freeze-encoder` trains only the projector and the heads (27.3 M), which is what the published
+# numbers use; without it the 394 M ModernBERT encoder trains too, at ~3x the wall clock.
+#
+# Two facts about the layouts, both measured in docs/vision-benchmark-results.md §4.5:
+#   * `sequential` (the default) scores all options in one row. It is the layout every table in
+#     that document used, and it flips ~17 % of its answers when the option list is reordered.
+#   * `state_conditioned` scores each option in its own row. It is order-invariant by construction
+#     (0 of 1 000 permutations moved the answer, on real data) and it costs `k` rows per item, so
+#     it needs ~3x the epochs and ~5x the scoring time to reach the same accuracy.
+#
+# GPUs are only visible outside a file sandbox on this machine (`bwrap --dev /dev` hides /dev/kfd),
+# and the interpreter has to be one whose torch is a HIP build: `PYTHON=python3 bash train.sh ...`.
 set -u
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
+BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$BENCH/../../.." && pwd)
 cd "$REPO"
 
 if [ -z "${PYTHON:-}" ]; then
   if [ -x "$REPO/.venv/bin/python" ]; then PYTHON="$REPO/.venv/bin/python"; else PYTHON=python3; fi
 fi
 # shellcheck source=gpuenv.sh
-. "$HERE/gpuenv.sh"
+. "$BENCH/gpuenv.sh"
 
+DATA="${VISION_CIFAR_DATA:-$REPO/.vision-cifar100}"
+export HF_HOME="${HF_HOME:-$DATA/hf}"
 export LAYA_MODELS="${LAYA_MODELS:-$REPO/models}"
-export HF_HOME="${HF_HOME:-$REPO/.hf-cache}"
-# One source of truth for where the data lives: ask the harness, do not guess here.
-BENCH="$("$PYTHON" -c "import sys; sys.path.insert(0, '$HERE'); import _paths; print(_paths.CIFAR)")"
 
 OUT="${1:?usage: train.sh OUT EPOCHS MICRO_BATCH [options]}"
 EPOCHS="${2:?usage: train.sh OUT EPOCHS MICRO_BATCH [options]}"
@@ -65,22 +73,22 @@ case "$DATASET" in
   *)   echo "train.sh: --dataset must be 20 or 100, got '$DATASET'" >&2; exit 2 ;;
 esac
 
-# `laya-train` evaluates on a subset while it trains; the held-out scoring is `eval_cifar.py` on
-# the full split. The subset is derived rather than checked in, so it cannot go stale when the
-# data moves.
-if [ ! -f "$BENCH/$EVAL" ]; then
-  head -n 300 "$BENCH/$FULL_EVAL" > "$BENCH/$EVAL"
+# `laya-train` evaluates on a subset while it trains; the held-out scoring is `eval_cifar.py` on the
+# full split. The subset is derived rather than checked in, so it cannot go stale when the data
+# moves, or when the data directory is a different one from the one it was cut in.
+if [ ! -f "$DATA/cifar100/$EVAL" ]; then
+  head -n 300 "$DATA/cifar100/$FULL_EVAL" > "$DATA/cifar100/$EVAL"
   echo "train.sh: derived $EVAL (300 rows) from $FULL_EVAL"
 fi
 
 # A strided subset, for sizing a layout that costs one row per option: `state_conditioned` puts
 # `k` rows in a batch where `sequential` puts one, so a 20-option run is ~20x the steps of a joint
-# run on the same data. Striding (not head) keeps the class balance.
+# run on the same items. Striding (not head) keeps the class balance.
 if [ -n "$TRAIN_ROWS" ]; then
   STRIDE=$(( (10000 + TRAIN_ROWS - 1) / TRAIN_ROWS ))
   SUBSET="train_rows${TRAIN_ROWS}.jsonl"
-  awk -v s="$STRIDE" 'NR % s == 1' "$BENCH/$TRAIN" > "$BENCH/$SUBSET"
-  echo "train.sh: derived $SUBSET ($(wc -l < "$BENCH/$SUBSET") rows, stride $STRIDE) from $TRAIN"
+  awk -v s="$STRIDE" 'NR % s == 1' "$DATA/cifar100/$TRAIN" > "$DATA/cifar100/$SUBSET"
+  echo "train.sh: derived $SUBSET ($(wc -l < "$DATA/cifar100/$SUBSET") rows, stride $STRIDE) from $TRAIN"
   TRAIN="$SUBSET"
 fi
 
@@ -91,12 +99,12 @@ else
 fi
 
 echo "train.sh: repo=$REPO"
-echo "train.sh: data=$BENCH/$TRAIN  base=$LAYA_MODELS/laya  out=$OUT"
+echo "train.sh: data=$DATA/cifar100  base=$LAYA_MODELS/laya  out=$OUT"
 echo "train.sh: dataset=$DATASET layout=$LAYOUT vision=$VISION"
 
-"$PYTHON" "$HERE/train_gpu.py" \
-  --data "$BENCH/$TRAIN" \
-  --eval "$BENCH/$EVAL" \
+"$PYTHON" "$BENCH/train_gpu.py" \
+  --data "$DATA/cifar100/$TRAIN" \
+  --eval "$DATA/cifar100/$EVAL" \
   --base "$LAYA_MODELS/laya" \
   --out "$OUT" \
   --vision "$VISION" \

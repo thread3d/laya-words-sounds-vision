@@ -7,10 +7,11 @@ to find a comparable run before choosing a checkpoint or a confidence threshold.
 and result files behind the main tables.
 
 The vision path's real-data benchmark has its own recipe next to the code it measures: the
-[CIFAR-100 harness](https://github.com/thread3d/laya-words-sounds-vision/tree/main/benchmarks/cifar100)
-(`benchmarks/cifar100/`) turns CIFAR-100 into 20- and 100-option `choice` questions, runs the
-controls and both release gates, and reproduces the tables in
-[the vision benchmark results](vision-benchmark-results.md).
+[CIFAR-100 harness](https://github.com/thread3d/laya-words-sounds-vision/tree/main/research/benchmarks/vision_cifar100)
+(`research/benchmarks/vision_cifar100/`) turns CIFAR-100 into 20- and 100-option `choice`
+questions, runs the controls and both release gates, and reproduces the tables in
+[the vision benchmark results](vision-benchmark-results.md). Its `results.json` is the artifact
+those tables cite.
 
 ## Find the relevant measurement
 

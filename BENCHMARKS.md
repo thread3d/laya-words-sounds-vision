@@ -196,6 +196,30 @@ banking77 is the one clear loss, and it is architectural: a choice question's op
 
 ---
 
+## Vision: CIFAR-100 as a 20- and 100-option decision
+
+Laya's vision path is measured on a public dataset rather than on a synthetic task. CIFAR-100 is
+asked in Laya's own shape — one `choice` question per photograph, the answer carried by the pixels
+only — and scored against the controls that make the number mean something. Held-out split, 5 000
+rows, identical for every arm:
+
+| arm | 20-way | 100-way |
+|---|---|---|
+| frozen linear probe on the SIGLIP2 embedding | 84.44 % | 79.54 % |
+| the tower's own zero-shot head | 57.50 % | 73.64 % |
+| `sequential` (joint) layout, 10 000 items | 87.28 % | 1.02 % (chance 1 %) |
+| `state_conditioned`, 2 000 items, 10 epochs | 81.30 % | not measured |
+
+The gate that decides whether a vision head ships is not accuracy. `state_conditioned` is the
+layout that passes both: gate 1 (removing the image drops accuracy to 5 %, i.e. chance) at
+**+0.760** and gate 2b (reordering the options does not move the answer) at **0.0 %**. The joint
+layout reaches a higher accuracy on five times the data and fails gate 2b at 16.9 %.
+
+100-way accuracy is unmeasured since v0.4.50 fixed the `[VIS_SUMMARY]` token that made those runs
+collapse. Full command list and `results.json`:
+[`research/benchmarks/vision_cifar100/`](research/benchmarks/vision_cifar100/README.md); analysis in
+[the vision benchmark results](docs/vision-benchmark-results.md).
+
 ## Speed (Tesla T4)
 
 | questions per call | laya | laya-multilingual |

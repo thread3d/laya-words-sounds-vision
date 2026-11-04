@@ -82,6 +82,21 @@ for text in ["मुझसे मार्च में दो बार शु�
 # multilingual technical
 ```
 
+Asked about a photograph, the state carries the picture. A checkpoint trained with `--vision` reads
+it; register it and the `Router` sends image states to it, above every language rule:
+
+```python
+router = Router(models={"vision": "./my-vision-checkpoint"})
+result = router.predict({"image_path": "shelf.jpg", "text": "what is on the shelf?"},
+                        {"stock": {"type": "choice", "instructions": "What is on the shelf?",
+                                   "criteria": ["cereal", "tinned goods", "cleaning products"]}})
+print(result["routing"]["model"], result["answers"]["stock"]["choice"])  # vision cereal
+```
+
+`predict_batch` takes image states and text states in the same batch, and the image is encoded once
+per distinct picture. See [vision fine-tuning](https://nandhakishorm.github.io/laya/finetune/#vision-teaching-a-checkpoint-to-look-at-a-picture)
+and [the measured results](https://nandhakishorm.github.io/laya/vision-benchmark-results/).
+
 From the command line, `laya "My payment failed twice" --preset triage` answers a ready-made question set. More in the [full quickstart](#quickstart-route-mode-recommended) and the [docs](https://nandhakishorm.github.io/laya/).
 
 ## Fine-tune for better accuracy
@@ -93,6 +108,29 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 ## Documentation
 
 **[nandhakishorm.github.io/laya](https://nandhakishorm.github.io/laya/)**: guides for [prediction hooks](https://nandhakishorm.github.io/laya/hooks/), [schema-driven decisions](https://nandhakishorm.github.io/laya/structured/), [Docker](https://nandhakishorm.github.io/laya/docker/) and [LangChain and LangGraph](https://nandhakishorm.github.io/laya/langchain/), plus a full [API reference](https://nandhakishorm.github.io/laya/reference/).
+
+## What's new in 1.0.0
+
+* **The vision path is a capability, not an experiment.** A checkpoint trained with
+  `--vision` answers from a picture: on 20-way CIFAR-100 it reaches **81.30 %** held out with
+  **gate 1 +0.760** (removing the image drops it to chance) and **gate 2b 0.0 %** (reordering the
+  options does not move the answer) — the first artifact here to pass both of the gates that
+  decide whether a vision head may ship. The layout that does it is `--option-layout
+  state_conditioned`; it costs epochs rather than accuracy, and the whole comparison is in
+  [the measured results](https://nandhakishorm.github.io/laya/vision-benchmark-results/).
+* **`[VIS_SUMMARY]` exists, so high-cardinality vision heads build.** `visual_plan` had been
+  reserving a token `PooledProjector` never emitted, which made any head above ~30 options refuse
+  before its first step; and it shifted every marker by one for an insertion that never happens,
+  so 0 of 100 markers landed on a `[MASK]`. Both are fixed, and a 100-option vision checkpoint now
+  trains.
+* **`laya-train`'s report tells the truth about a vision run.** It scored a text-only evaluation
+  of the image rows and never loaded the base checkpoint's projector, printing 0.0333 for a
+  checkpoint that measures 0.8728. It now loads the projector (`vision.safetensors`), refuses a
+  checkpoint that declares vision and ships none, and scores what the run actually trained.
+* **`predict_batch` accepts a batch that mixes image and text states.** It raised
+  `KeyError: 'visual'`, which also made a batched image-ablation gate impossible.
+* **The CIFAR-100 harness lives in the repository** (`research/benchmarks/vision_cifar100/`),
+  writes no absolute path, and reproduces every published number.
 
 ## What's new in 0.4.21
 

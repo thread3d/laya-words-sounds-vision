@@ -1,13 +1,13 @@
 {
   "benchmark": "cifar100-as-choice",
-  "measured": "2026-11-03",
+  "measured": "2026-11-04",
   "split": {
     "train": 10000,
     "held_out": 5000,
     "per_class_train": 100,
     "per_class_eval": 50
   },
-  "note": "Every arm scored on the identical held-out rows. Laya numbers come from the saved checkpoint via eval_cifar.py, never from laya-train's console report, which disagreed with the artifact (0.033 against 0.873).",
+  "note": "Every arm scored on the identical held-out rows. Laya numbers come from the saved checkpoint via eval_cifar.py, never from laya-train's console report -- which disagreed with the artifact (0.033 against 0.873) until v0.4.47 fixed two defects behind that number.",
   "chance": {
     "100_way": 0.01,
     "20_way": 0.05
@@ -104,10 +104,51 @@
   "defects_found": [
     "visual_plan promises one more visual token than PooledProjector emits above summary_for_options_over (96 rendered option tokens), so a >~30-option vision head cannot be built",
     "that summary token, when enabled, shifts every marker by +1 while _cat inserts the block after all of them: 0/100 markers land on a [MASK] token",
-    "Agent.predict_batch raises KeyError: 'visual' on a batch that mixes an image state with a text-only one (laya/vision.py collate_visual), which makes a batched gate-1 ablation impossible"
+    "Agent.predict_batch raises KeyError: 'visual' on a batch that mixes an image state with a text-only one (laya/vision.py collate_visual), which makes a batched gate-1 ablation impossible",
+    "laya-train's before/after table scored a text-only evaluation of the image rows and never loaded the base checkpoint's projector: it printed 0.0333 for a checkpoint that measures 0.8728 (fixed in v0.4.47)",
+    "predict_batch raised KeyError: 'visual' on a batch mixing an image state with a text state, which made a batched image-ablation gate impossible (fixed in v0.4.48)",
+    "visual_plan reserved a [VIS_SUMMARY] token that PooledProjector never emitted, so any head over ~30 options refused to build; and it shifted every marker by one for an insertion that never happens, putting 0 of 100 markers on a [MASK] (fixed in v0.4.50)"
   ],
   "caveats": [
     "single seed except the 20-way x 64-visual-token check (collapsed at seed 31, learned at seed 77)",
     "predict_batch timing on image states was inconsistent across configurations; not investigated"
-  ]
+  ],
+  "layout_comparison": {
+    "note": "The layout the spec says ships (state_conditioned: one option per row) measured against the joint layout on identical data, seed and epoch budget. Same 2000-item class-balanced stride (1800 after the calibration slice), seed 77, frozen tower and frozen text encoder, scored on the full 5000-row 20-way held-out split.",
+    "arms": {
+      "joint_2k_3ep": {
+        "checkpoint": "ckpt20_joint_2k",
+        "layout": "sequential",
+        "items": 2000,
+        "epochs": 3,
+        "accuracy": 0.7822,
+        "ece": 0.0181,
+        "gate1_gain": 0.73,
+        "gate2b_flip_rate": 0.283
+      },
+      "state_conditioned_2k_3ep": {
+        "checkpoint": "ckpt20_sc_2k",
+        "layout": "state_conditioned",
+        "items": 2000,
+        "epochs": 3,
+        "accuracy": 0.3696,
+        "ece": 0.0224,
+        "gate1_gain": 0.305,
+        "gate2b_flip_rate": 0.0,
+        "comment": "undertrained: this layout builds k rows per item, so 3 epochs is far too few"
+      },
+      "state_conditioned_2k_10ep": {
+        "checkpoint": "ckpt20_sc_2k_10ep",
+        "layout": "state_conditioned",
+        "items": 2000,
+        "epochs": 10,
+        "accuracy": 0.813,
+        "ece": 0.0229,
+        "gate1_gain": 0.76,
+        "gate2b_flip_rate": 0.0,
+        "comment": "the first checkpoint in this repository to pass both gates on real data"
+      }
+    },
+    "caveat": "single-seed; of four identical joint-layout runs started for this measurement three collapsed to the class prior (mean loss pinned to ln 20) and one learned. Only the first two arms are a data-matched comparison."
+  }
 }

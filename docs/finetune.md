@@ -203,6 +203,96 @@ changes nothing measurable. With 20 options it raises accuracy by 0.55 points an
 that change by about a quarter, both significant over the two seeds, for about 14% more training
 time. Use it when questions have many options.
 
+## Vision: teaching a checkpoint to look at a picture
+
+A state may carry an image, and `--vision` is what turns a checkpoint into one that can read it:
+
+```bash
+laya-train --data items.jsonl --base english --out ./my-vision-checkpoint \
+  --vision '{"n_visual_tokens": 16}' --option-layout state_conditioned
+```
+
+The image goes in the state next to the text, as `image_path`, `image` (bytes, base64 or a
+`pixels` tensor), or `image_base64`; a picture with no text at all is a legal state, because the
+picture is the evidence. `laya.vision.split_state` and `split_state`'s key list are the reference
+for the accepted shapes.
+
+What `--vision` costs: a frozen vision tower (92.9 M parameters for SigLIP2-base/16) beside the
+text encoder, plus one projected block of `n_visual_tokens` rows spliced into the sequence after
+the options. With `--freeze-encoder` only the projector and the heads train — 27.3 M parameters —
+and a 10 000-item, four-epoch 20-option run takes about 18 minutes on one 32 GiB card.
+
+### The option layout is the decision that matters
+
+`--option-layout` has three values, and for vision it is the whole ballgame:
+
+| layout | how options are scored | order invariance | cost |
+|---|---|---|---|
+| `sequential` (default) | all options in one row | **flips** on reordering | 1 row per item |
+| `state_conditioned` | one option per row, compared in the softmax | **0.0 %** | `k` rows per item |
+| `parallel` | not supported with vision: its masks are built from token ids, which a spliced block does not have | — | — |
+
+Measured on 20-way CIFAR-100, identical data, seed and epoch budget
+([the write-up](vision-benchmark-results.md#45-the-state_conditioned-layout-on-the-same-data-and-the-first-artifact-that-passes-both-gates)):
+
+| layout | held out | gate 1 (image ablation) | gate 2b (option-order flips) |
+|---|---|---|---|
+| `sequential` | 0.782 | +0.730 | 28.3 % |
+| `state_conditioned`, 3 epochs | 0.370 | +0.305 | 0.0 % |
+| `state_conditioned`, 10 epochs | **0.813** | **+0.760** | **0.0 %** |
+
+`state_conditioned` is the layout that ships: it is order-invariant by construction, so a caller
+who reorders a list cannot change the answer. The price is sample efficiency — a row sees one
+option instead of all of them, so it needs roughly three times the epochs to reach the same
+accuracy, and scoring it costs about five times as much, because an item is `k` rows.
+
+### High-cardinality heads get a `[VIS_SUMMARY]` token
+
+Above `summary_for_options_over` rendered option tokens (default 96, which is roughly 30 options)
+the block carries one extra row: the globally pooled patch vector. It is the only token in the
+block that has seen every patch, which is what a head whose last markers sit outside the encoder's
+128-token local window needs in order to reach the picture at all.
+
+That row existed in the plan for a long time without existing in the code, so any head above ~30
+options refused to build (`plan expects 17 visual tokens, got 16`). It is implemented as of
+v0.4.50, and `summary_for_options_over` is a knob now rather than a trap — set it to `0` to force
+the block down to `n_visual_tokens` rows, which is what every checkpoint published before v0.4.50
+was trained with.
+
+### The projector is saved beside the weights, and loaded on resume
+
+`DecisionModel` deliberately has no vision parameters — a new one would break
+`load_state_dict(..., strict=True)` for every text checkpoint — so the projector lives in its own
+file in the checkpoint directory (`vision.safetensors`). Three consequences worth knowing:
+
+* a checkpoint that declares vision and does not carry that file is refused, rather than answering
+  plausibly from a randomly initialised projector;
+* `laya-train --base <a vision checkpoint>` continues from the saved projector. It did not before
+  v0.4.47: it silently rebuilt one at random and scored *that* in its own report;
+* `--freeze-encoder` affects the text encoder, not the projector — the projector is what a vision
+  fine-tune is normally training.
+
+### Read the before/after table, then run the gates anyway
+
+`laya-train` prints a before/after table on `--eval`, and for a vision checkpoint those numbers are
+what a full run costs you if they are wrong. Before v0.4.47 they were wrong twice: the eval rows
+were built without the image (so the table scored the state text alone, and reported chance for a
+checkpoint answering at 0.87), and the projector was not loaded. Both are fixed, and
+`VISION_PROGRESS.md` in the vision checkout records how far the number was off (0.0333 reported,
+0.8728 measured).
+
+The table is still not a release gate. Two `laya-evals` subcommands are:
+
+```bash
+laya-evals ablate eval.jsonl --model ./my-vision-checkpoint --min-gain 0.35
+laya-evals flip   eval.jsonl --model ./my-vision-checkpoint --max-flip-rate 0.02
+```
+
+`ablate` removes the image and requires accuracy to fall by at least the given margin — that is
+what catches a fusion layer that learned to answer from the text and treat the picture as
+decoration. `flip` permutes the option list and requires the answer not to move. Both are
+described in [the evaluation harness](evals.md#vision-gates-does-it-actually-look-at-the-image).
+
 ## Fine-tuning from Python
 
 `laya.train.finetune` is what `laya-train` calls:

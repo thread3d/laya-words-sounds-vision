@@ -212,6 +212,23 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 }'
 ```
 
+A state may carry a photograph instead of, or beside, its text: `state` becomes an object with
+`image_path`, `image` (bytes, base64) or `image_base64`, and the same three limits in the
+environment table above apply. An image state is routed to the vision checkpoint when one is
+registered, so a mixed workload needs no per-request hint — and `POST /v1/systemone/batch`
+accepts a list that mixes image states with text-only ones.
+
+```bash
+curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
+  "state": {"image_base64": "'"$(base64 -w0 shelf.jpg)"'", "text": "what is on the shelf?"},
+  "questions": {"stock": {"type": "choice", "instructions": "What is on the shelf?",
+                          "criteria": ["cereal", "tinned goods", "cleaning products"]}}
+}'
+```
+
+`image_url` is refused unless `LAYA_ALLOW_IMAGE_URLS=1`: a self-hosted engine that fetches any URL
+a caller names is an SSRF primitive pointed at the operator's own network.
+
 | field | required | meaning |
 |---|---|---|
 | `state` | yes | the one context every question in the request is answered against: text, email, ticket or JSON; a missing or `null` state is a `400` |
