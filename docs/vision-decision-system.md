@@ -172,7 +172,7 @@ their evidence.
 
 ### 3.1 The decision head is `[MASK]`-marker scoring, not a classifier
 
-`DecisionModel` (`laya/common.py:575`) is a ModernBERT encoder + a typed head:
+`DecisionModel` (`laya/common.py:599`) is a ModernBERT encoder + a typed head:
 
 ```
 sequence:       [CLS] <type> "question: <instructions>" [SEP] [MASK]opt0 [MASK]opt1 … [SEP] STATE [SEP]
@@ -203,7 +203,7 @@ ModernBertModel.forward: ['self', 'input_ids', 'attention_mask', 'position_ids',
 ```
 
 `Agent._infer` currently passes only `input_ids`, but the parallel-option layout already passes
-`position_ids` (`DecisionModel.forward`, `laya/common.py:617-619`), so the plumbing for custom
+`position_ids` (`DecisionModel.forward`, `laya/common.py:648-650`), so the plumbing for custom
 position ids exists and is exercised.
 
 ### 3.3 Visual token injection works end to end (spike run in this checkout)
@@ -1637,7 +1637,8 @@ have to happen first.
 | § | what | status | where | test |
 |---|---|---|---|---|
 | 2 | the six invariants (C1-C6) | **held** — no generation, typed answers, calibrated confidence, abstention, determinism, and byte-identical text sequences | everywhere | `test_vision.py` asserts the no-vision-block path explicitly |
-| 4.1 | visual-token layout, type vector, reserved position block, `[VIS_SUMMARY]` | **implemented** | `laya/vision.py` (`vision_plan`, `assemble_inputs_embeds`, `PooledProjector`) | `test_vision.py` |
+| 4.1 | visual-token layout, type vector, reserved position block | **implemented** | `laya/vision.py` (`vision_plan`, `assemble_inputs_embeds`, `PooledProjector`) | `test_vision.py` |
+| 4.1 | the `[VIS_SUMMARY]` token this section specifies | **not implemented** — `visual_plan` reserves the extra token for a head above `summary_for_options_over` and `PooledProjector` emits only `n_visual_tokens`, so such a head refuses to build (`plan expects 17 visual tokens, got 16`), which is why no high-cardinality vision checkpoint can be trained today. The plan's marker shift is also inconsistent with `assemble_inputs_embeds`, which splices *at* the splice point | `laya/vision.py` (`vision_plan`, `PooledProjector`) | none — see `vision-benchmark-results.md` §4 |
 | 4.1.1 | option independence (state-conditioned scoring) | **implemented** as `option_layout="state_conditioned"` | `laya/agent.py` | `test_state_conditioned.py` — permuting options does not change the answer |
 | 4.2 | vision tower, `keep_layers` truncation | **implemented** | `laya/vision.py` (`load_tower`) | `test_vision.py` |
 | 4.3 | compression | **baseline only**: `adaptive_avg` / `none`. Coarse-to-fine is *measurement-gated* by the spec itself, and the Perceiver resampler is deliberately absent | `PooledProjector` | `test_vision.py` |
