@@ -41,8 +41,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import torch
 
 from .calibrate import MIN_TYPE_N, fit_abstention_thresholds, fit_temperature_map
-from .vision import (VisualCache, build_vision_encoder, load_pixels, local_tower_dir,
-                     parse_vision, split_state, visual_plan)
+from .vision import (VISION_WEIGHTS_FILE, VisualCache, build_vision_encoder, load_pixels,
+                     load_vision_weights, local_tower_dir, parse_vision, split_state,
+                     visual_plan)
 from .common import (
     uses_state_conditioned_layout,
     OPTION_LAYOUTS,
@@ -376,12 +377,17 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
     for row in rows:
         state = row.get("state")
         visual = None
+        visual_key = None
         text_budget = max_len
         if vision is not None and encode_visual is not None and state is not None:
             state, image_spec = split_state(state)
             if image_spec is not None:
                 pixels = load_pixels(image_spec, vision.image_size)
                 visual = cache.get_or_encode(pixels, encode_visual)
+                # The image's identity, for callers that need to tell two rows apart. `state_ids`
+                # cannot: a vision state is split, so every image row carries the same few text
+                # tokens ("a photograph") and looks identical to every other.
+                visual_key = VisualCache.key(pixels)
                 text_budget = max_len - vision.n_visual_tokens
                 if text_budget < 16:
                     skipped["image_too_large"] = skipped.get("image_too_large", 0) + 1
@@ -420,10 +426,59 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                 if visual is not None:
                     # Patches, projected later inside the training step (see `_visual_encoder_fn`).
                     item["visual_patches"] = visual
+                    item["visual_key"] = visual_key
                 items.append(item)
             else:
                 skipped[reason] = skipped.get(reason, 0) + 1
     return items, skipped
+
+
+def attach_projector(encoder, model_dir: str, base_declares_vision: bool) -> str:
+    """Restore the base checkpoint's trained projector, or refuse, or say a new one is being made.
+
+    The projector is not part of `model.state_dict()` -- it lives beside the weights (see
+    `laya.vision`) -- so `build_vision_encoder` cannot restore it and returns one that is randomly
+    initialised. `Agent` loads it explicitly and refuses a checkpoint that ships none; the trainer
+    did neither, which meant that starting from a vision checkpoint silently restarted from a
+    random projector, and the run's own evaluation table scored that projector instead of the
+    checkpoint it had just trained (`VISION_PROGRESS.md`, R8: 0.0333 reported, 0.8728 measured).
+
+    Three outcomes, and the caller prints the returned sentence:
+
+    * the base carries a projector -- load it and continue from it;
+    * the base *declares* vision and carries none -- refuse, because training a head against noise
+      produces numbers that look like a working checkpoint;
+    * the base has no vision block at all -- this run is where the projector is created, which is
+      the normal path for a first vision fine-tune.
+    """
+    if os.path.exists(os.path.join(model_dir, VISION_WEIGHTS_FILE)):
+        load_vision_weights(encoder, model_dir)
+        return ("continuing from the base checkpoint's projector (%s)" % VISION_WEIGHTS_FILE)
+    if base_declares_vision:
+        raise FileNotFoundError(
+            "%r declares vision support but carries no %r. Refusing to start from a randomly "
+            "initialised projector: it would train a head against noise and report numbers that "
+            "look like a working checkpoint." % (model_dir, VISION_WEIGHTS_FILE))
+    return ("base checkpoint has no projector; this run trains a new one "
+            "(n_visual_tokens=%d)" % encoder.config.n_visual_tokens)
+
+
+def eval_items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int, head_max_len: int,
+                         vision=None, encode_visual=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """The `--eval` rows, built through the *same* modality path the training rows used.
+
+    An eval set exists to answer "how good is this checkpoint", and for a vision checkpoint the
+    answer depends on the picture. Built without `vision=` / `encode_visual=` the items carry no
+    visual block, and nothing downstream fails: `_project_visual` finds no patches and returns the
+    item unchanged, the batch takes the text-only collate path, and the report scores the state
+    text alone. What that mistake cost, measured on CIFAR-100 (`VISION_PROGRESS.md`, R8): the
+    trainer printed accuracy 0.0333 for a checkpoint that answers at 0.8728 on the identical
+    rows -- a number wrong enough to send several sessions after the wrong hypothesis.
+
+    `label_smoothing=0.0` stays: the eval report is about accuracy, not the training target.
+    """
+    return items_from_rows(tok, rows, max_len, head_max_len, label_smoothing=0.0,
+                           vision=vision, encode_visual=encode_visual)
 
 
 def rows_from_csv(path: str, text_column: str = "text", label_column: str = "label",
@@ -1310,6 +1365,9 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     config.validate()
     dev = resolve_device(device)
     model, tok, cfg = load_checkpoint(model_dir)
+    # Whether the *base checkpoint* already declares vision, captured before `--vision` can add the
+    # block: the two cases want different answers when the weights file is missing.
+    base_declares_vision = parse_vision(cfg) is not None
     if config.vision is not None:
         # Declaring vision support is what turns a text checkpoint into a vision one. It has to
         # happen before `parse_vision` below and before any checkpoint is saved, so the block
@@ -1348,6 +1406,13 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         # so the `model.to(dev)` above cannot reach it, and nothing else moves the tower: without
         # this line a GPU run encodes the whole dataset on the CPU and merely looks like a slow
         # GPU run. Measured here at 2 images/s, versus hundreds once the tower is on the card.
+        # The projector is not part of `model.state_dict()` (it lives beside the weights, see
+        # `laya.vision`), so building the encoder does NOT restore it: `PooledProjector` comes
+        # back randomly initialised. `Agent` loads it explicitly and refuses a checkpoint that
+        # ships none; the trainer used to do neither, so a run continued from a vision checkpoint
+        # silently restarted from a random projector -- and its own evaluation table scored that
+        # random projector rather than the checkpoint it had just trained.
+        print("vision: %s" % (attach_projector(encoder, model_dir, base_declares_vision),), flush=True)
         encoder.to(dev)
         encode_visual = _visual_encoder_fn(encoder)
         print("vision checkpoint: tower %s, %d visual tokens, modality dropout %g"
@@ -1374,7 +1439,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         eval_source = config.eval_data
         eval_rows = read_data(config.eval_data, text_column=config.text_column, label_column=config.label_column,
                               question_id=config.question_id, instructions=config.instructions)
-        eval_items, eval_skipped = items_from_rows(tok, eval_rows, max_len, head_max_len, label_smoothing=0.0)
+        eval_items, eval_skipped = eval_items_from_rows(tok, eval_rows, max_len, head_max_len,
+                                                     vision=vision, encode_visual=encode_visual)
 
         if not eval_items:
             eval_mode = None
@@ -1387,27 +1453,21 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
             # Build input signatures from normalized, usable items:
             # (state token ids, normalized question schema).
             # Checked separately from targets to detect shared inputs even when labels differ (#967).
-            train_input_sigs = {
-                (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True))
-                for it in train_items
-            }
-            calib_input_sigs = {
-                (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True))
-                for it in calib_items
-            }
+            def input_sig(it):
+                # A vision row's text is not its input: the image is. Every CIFAR row shares the
+                # state text "a photograph", so a text-only signature calls two different pictures
+                # the same row and reports a held-out eval set as overlapping its training data.
+                return (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True),
+                        it.get("visual_key"))
 
-            train_overlap_count = sum(
-                1 for it in eval_items
-                if (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True)) in train_input_sigs
-            )
-            calib_overlap_count = sum(
-                1 for it in eval_items
-                if (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True)) in calib_input_sigs
-            )
+            train_input_sigs = {input_sig(it) for it in train_items}
+            calib_input_sigs = {input_sig(it) for it in calib_items}
+
+            train_overlap_count = sum(1 for it in eval_items if input_sig(it) in train_input_sigs)
+            calib_overlap_count = sum(1 for it in eval_items if input_sig(it) in calib_input_sigs)
             total_overlap_count = sum(
                 1 for it in eval_items
-                if (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True)) in train_input_sigs
-                or (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True)) in calib_input_sigs
+                if input_sig(it) in train_input_sigs or input_sig(it) in calib_input_sigs
             )
 
             if total_overlap_count > 0:

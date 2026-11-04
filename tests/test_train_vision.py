@@ -8,6 +8,7 @@ and one optimization step moves the loss through the embeddings path.
 import os
 import struct
 import sys
+import tempfile
 import zlib
 
 import torch
@@ -97,6 +98,118 @@ def _rows():
          "questions": {"q": question}, "expected": {"q": "b"}},
         {"state": "text only", "questions": {"q": question}, "expected": {"q": "a"}},
     ]
+
+
+# -- the eval report ---------------------------------------------------------------------------
+
+def test_eval_rows_are_built_through_the_vision_path():
+    """`--eval` rows carry the picture, because the report is about the picture.
+
+    `laya-train` printed accuracy 0.0333 for a CIFAR-100 checkpoint that measures 0.8728 on the
+    same held-out rows (`VISION_PROGRESS.md`, R8). The cause was here: `finetune` built its eval
+    items without `vision=`/`encode_visual=`, so the before/after table scored the state text
+    ("a photograph") alone -- and reported chance, correctly, for what it was actually shown.
+    """
+    from laya.train import eval_items_from_rows
+
+    vision = _vision()
+    enc = _encoder(vision)
+    rows = _rows()
+    items, skipped = eval_items_from_rows(_StubTok(), rows, max_len=512, head_max_len=192,
+                                          vision=vision, encode_visual=_encode_visual(enc))
+    assert skipped == {}, skipped
+    assert sum(1 for it in items if "visual_patches" in it) == 2, \
+        "the image rows lost their visual block on the way to the eval report"
+    assert items[2].get("visual_patches") is None, "a text row must evaluate as text"
+
+
+def test_the_eval_report_scores_the_picture_not_just_the_state_text():
+    """The two item sets produce different logits, so the report's number moves with the image."""
+    from laya.train import calibration_records, eval_items_from_rows
+
+    torch.manual_seed(0)
+    model = _model().eval()
+    tok = _StubTok()
+    vision = _vision()
+    enc = _encoder(vision)
+    embeds = model.encoder.embeddings
+    table = getattr(embeds, "tok_embeddings", None) or embeds.word_embeddings
+
+    # Image *paths*, not pixel tensors: the text-only path serializes the state to JSON, so a
+    # tensor state raises instead of quietly dropping the picture -- which is exactly why the
+    # CIFAR rows ({"text": ..., "image_path": ...}) failed silently and these would not.
+    question = {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]}
+    tmp = tempfile.mkdtemp()
+    rows = []
+    for i in range(4):
+        path = os.path.join(tmp, "img%d.png" % i)
+        with open(path, "wb") as handle:
+            handle.write(_png())
+        rows.append({"state": {"image_path": path, "text": "same"},
+                     "questions": {"q": question}, "expected": {"q": "ab"[i % 2]}})
+    seen, _ = eval_items_from_rows(tok, rows, max_len=512, head_max_len=192,
+                                   vision=vision, encode_visual=_encode_visual(enc))
+    blind, _ = items_from_rows(tok, rows, max_len=512, head_max_len=192, label_smoothing=0.0)
+
+    kwargs = dict(vision=vision, embed_fn=table, max_positions=MAXPOS, projector=enc.projector)
+    with torch.no_grad():
+        a = calibration_records(model, tok, seen, torch.device("cpu"), 512, 192, batch_size=4, **kwargs)
+        b = calibration_records(model, tok, blind, torch.device("cpu"), 512, 192, batch_size=4, **kwargs)
+    assert len(a) == len(b) == len(rows), (len(a), len(b))
+    differs = any(abs(float(x) - float(y)) > 1e-6 for x, y in zip(a[0][1], b[0][1]))
+    assert differs, "the eval report's logits ignore the visual block"
+
+
+# -- the projector on resume ------------------------------------------------------------------
+
+def test_a_resumed_vision_checkpoint_keeps_its_trained_projector():
+    """A run started from a vision checkpoint must continue from its projector, not from noise.
+
+    The projector is deliberately not in `model.state_dict()`, so `build_vision_encoder` cannot
+    restore it: it returns a randomly initialised `PooledProjector` every time. `Agent` loads it
+    explicitly; `finetune` did not, so `laya-train --base <vision checkpoint>` silently discarded
+    the trained projector -- and the run's own evaluation table scored that random projector,
+    which is why it printed 0.0333 for a checkpoint that measures 0.8728 (`VISION_PROGRESS.md`,
+    R8).
+    """
+    from laya.train import attach_projector
+    from laya.vision import save_vision_weights
+
+    vision = _vision()
+    trained = _encoder(vision)
+    with torch.no_grad():
+        # Values a fresh init cannot produce, so the assertion cannot pass by luck.
+        trained.projector.proj.weight.add_(1.0)
+        trained.projector.proj.bias.add_(2.0)
+        trained.projector.type_vector.add_(3.0)
+    tmp = tempfile.mkdtemp()
+    save_vision_weights(trained, tmp)          # stores float16, hence the tolerance below
+
+    fresh = _encoder(vision)
+    note = attach_projector(fresh, tmp, base_declares_vision=True)
+    assert "continuing from the base checkpoint's projector" in note, note
+    assert torch.allclose(fresh.projector.proj.weight, trained.projector.proj.weight, atol=1e-3)
+    assert torch.allclose(fresh.projector.type_vector, trained.projector.type_vector, atol=1e-3)
+
+
+def test_a_vision_checkpoint_without_projector_weights_is_refused():
+    """Declaring vision and shipping no projector is a corrupt checkpoint, not a fresh start."""
+    from laya.train import attach_projector
+
+    try:
+        attach_projector(_encoder(_vision()), tempfile.mkdtemp(), base_declares_vision=True)
+    except FileNotFoundError as exc:
+        assert "vision.safetensors" in str(exc), exc
+    else:
+        raise AssertionError("a vision checkpoint with no projector weights was accepted")
+
+
+def test_a_text_base_checkpoint_starts_a_new_projector():
+    """The first vision fine-tune is where a projector is created; that is not an error."""
+    from laya.train import attach_projector
+
+    note = attach_projector(_encoder(_vision()), tempfile.mkdtemp(), base_declares_vision=False)
+    assert "trains a new one" in note, note
 
 
 # -- items -----------------------------------------------------------------------------------
@@ -291,6 +404,11 @@ def test_training_with_a_vision_encoder_attached_projects_inside_the_step():
 
 
 if __name__ == "__main__":
+    test_a_resumed_vision_checkpoint_keeps_its_trained_projector()
+    test_a_vision_checkpoint_without_projector_weights_is_refused()
+    test_a_text_base_checkpoint_starts_a_new_projector()
+    test_eval_rows_are_built_through_the_vision_path()
+    test_the_eval_report_scores_the_picture_not_just_the_state_text()
     test_image_rows_become_items_that_carry_a_visual_block()
     test_one_image_asked_many_questions_costs_one_tower_pass()
     test_an_image_only_row_is_a_legal_training_item()
