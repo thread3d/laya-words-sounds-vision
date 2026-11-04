@@ -12,3 +12,12 @@ PYTHON="${PYTHON:-python3}"
 TORCHLIB="$("$PYTHON" -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"
 export LD_LIBRARY_PATH="$TORCHLIB:${LD_LIBRARY_PATH:-}"
 unset HSA_OVERRIDE_GFX_VERSION
+
+# Sourcing this with an interpreter whose torch is a *different* build points the loader at the
+# wrong libtorch and torch fails with a bare AttributeError on import (`_C` has no
+# `_dlpack_exchange_api`), which reads like a broken install. It is a mismatched pair: the repo
+# `.venv` is the CPU CI interpreter, and GPU work has to name the HIP one (`PYTHON=python3`).
+if ! "$PYTHON" -c 'import torch' >/dev/null 2>&1; then
+  echo "gpuenv.sh: $PYTHON cannot import torch with $TORCHLIB on LD_LIBRARY_PATH." >&2
+  echo "gpuenv.sh: interpreter and torch build do not match; GPU runs need PYTHON=<a HIP build>." >&2
+fi

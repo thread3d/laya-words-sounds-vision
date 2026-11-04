@@ -27,11 +27,11 @@ Three results, in order of how much they should change the plan:
    57.5 %, **with better calibration than the linear probe** (ECE 0.018 vs 0.129) and a real
    risk–coverage curve (96.2 % accuracy on the 80 % it answers). Gate 1 passes by a mile: 87.3 %
    with the image, 5.4 % without — chance — gain **+0.819** (the gate needs 0.35).
-2. **It fails gate 2b on real data: 16.9 % option-order flips**, against the 8-10 % the published
-   literature reports and against 0.00 % for both classifier controls (which are order-invariant by
-   construction). The spec says a joint layout at that flip rate **does not ship** ( §4.1, §9). This
-   is the first time that gate has been pointed at a real dataset, and it is the reason the 20-way
-   result is not yet a shippable one.
+2. **The joint layout fails gate 2b on real data: 16.9 % option-order flips**, against the 8-10 %
+   the published literature reports and against 0.00 % for both classifier controls (which are
+   order-invariant by construction). The spec says a joint layout at that flip rate does not ship
+   (§4.1, §9). §4.5 then measures the layout that does ship: `state_conditioned` reaches
+   **0.0 % flips with 0.813 held-out accuracy**, passing both gates.
 3. **At 100 options the head does not learn at all** — it collapses to the uniform prior in four
    independent runs, including one with a trainable text encoder. The information is present in the
    same frozen features (a 76 900-parameter linear layer gets 79.5 % out of them); the decision head
@@ -250,6 +250,57 @@ harness: gate 1 is *by construction* a comparison of image and text-only states,
 ablation cannot run at all, and `collate_visual`'s own contract says the opposite ("the ones without
 simply have none"). Every gate number in this document was therefore measured one state per forward
 pass, which is why the gate passes cost more than the 5 000-row accuracy pass.
+
+---
+
+## 4.5 The `state_conditioned` layout on the same data, and the first artifact that passes both gates
+
+Every table above is the joint (`sequential`) layout -- the one that scores all options in one
+sequence, and the one that flips 16.9 % of its answers when a caller reorders a list. The layout
+the spec says ships is `state_conditioned`: each option is scored in its own pass, so permuting the
+list cannot move the answer by construction. Until this run it had only ever been measured on the
+four-colour synthetic task, where its 0.0 % flip rate cost nothing because the accuracy was at
+chance.
+
+Three arms, identical in everything but the layout and the epoch budget. Same 2 000-item
+class-balanced stride of the 20-way training split (1 800 items after the calibration slice), same
+seed 77, same frozen tower and frozen text encoder, scored on the full 5 000-row held-out split
+with `eval_cifar.py`.
+
+| arm | layout | items | epochs | held-out acc | ECE | gate 1 gain | **gate 2b flips** |
+|---|---|---|---|---|---|---|---|
+| `ckpt20_joint_2k` | sequential | 2 000 | 3 | 0.7822 | 0.0181 | +0.730 | **28.3 %** |
+| `ckpt20_sc_2k` | state_conditioned | 2 000 | 3 | 0.3696 | 0.0224 | +0.305 | **0.0 %** |
+| `ckpt20_sc_2k_10ep` | state_conditioned | 2 000 | 10 | **0.8130** | 0.0229 | **+0.760** | **0.0 %** |
+| *`ckpt_cifar20_frozen`* (reference) | sequential | 10 000 | 4 | 0.8728 | 0.0184 | +0.819 | 16.9 % |
+
+**What this settles: order invariance is real on real data.** 0 of 1 000 permutations moved the
+answer for the state-conditioned arm, against 283 for the joint arm on identical rows, identical
+budget and identical seed, and against 169 for the full-data joint checkpoint. That is gate 2b
+passing by the letter of the spec rather than by the arithmetic of a toy task.
+
+**`ckpt20_sc_2k_10ep` is the first vision checkpoint in this repository to pass both gates on a
+public dataset**: gate 1 at +0.760 (the image is doing the work; 5 % without it is chance) and gate
+2b at 0.000 with ECE 0.023. It trains in ~19 minutes and scores in ~30 (a state-conditioned item is
+`k` rows, so scoring costs ~5x a joint arm).
+
+**What it costs: sample efficiency.** In the joint layout one row sees all twenty options and the
+model compares them in that row; in `state_conditioned` a row sees one option and the comparison
+happens in the softmax across rows. At three epochs the arm is badly undertrained -- 0.370 against
+the joint arm's 0.782 on the same items -- and it takes ten epochs (~19 min) to overtake it (0.813
+against 0.782) while staying ~6 points under the 10 000-item joint checkpoint. So the honest
+summary is: **the layout buys order invariance and pays for it in epochs, not in accuracy
+ceiling** -- whether the 0.87 of the large joint run is reachable with more data is untested here.
+
+Two caveats, recorded rather than hidden:
+
+* the 20-way numbers above sit on 2 000 training items; the 0.8728 reference used 10 000. Only the
+  first two rows are a data-matched comparison.
+* runs are single-seed and, at this scale, not reproducible: of four identical joint-layout runs
+  started this session, three collapsed to the class prior (mean loss stuck at `ln 20`) and one
+  learned (`VISION_PROGRESS.md` records the same instability). The flip rate is not a marginal
+  effect and did not depend on which run learned, but an accuracy comparison between two single
+  runs carries that risk explicitly.
 
 ---
 

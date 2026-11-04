@@ -68,19 +68,35 @@ HIP_VISIBLE_DEVICES="" python3 benchmarks/cifar100/controls_calib.py
 HIP_VISIBLE_DEVICES="" python3 benchmarks/cifar100/controls20.py
 
 # 3. train (frozen tower *and* frozen text encoder): ~18 min at 20 options, ~34 min at 100
-bash benchmarks/cifar100/train.sh "$LAYA_BENCH_DATA/ckpt_cifar20_frozen" 4 8 --dataset 20 --freeze-encoder
-bash benchmarks/cifar100/train.sh "$LAYA_BENCH_DATA/ckpt_cifar_frozen" 3 8 --dataset 100 \
-     --summary-over 0 --freeze-encoder
+PYTHON=python3 bash benchmarks/cifar100/train.sh "$LAYA_BENCH_DATA/ckpt_cifar20_frozen" 4 8 \
+     --dataset 20 --freeze-encoder
+PYTHON=python3 bash benchmarks/cifar100/train.sh "$LAYA_BENCH_DATA/ckpt_cifar_frozen" 3 8 \
+     --dataset 100 --freeze-encoder
+#    `--layout state_conditioned` scores each option in its own pass: order-invariant, and ~20x
+#    the steps per epoch. `--train-rows N` takes a class-balanced stride of the training split,
+#    which is how a state-conditioned arm is sized to fit a session.
+PYTHON=python3 bash benchmarks/cifar100/train.sh "$LAYA_BENCH_DATA/ckpt20_sc" 3 8 \
+     --dataset 20 --layout state_conditioned --train-rows 2000 --freeze-encoder
 
 # 4. score the artifact -- never the trainer's console report
 python3 benchmarks/cifar100/eval_cifar.py "$LAYA_BENCH_DATA/ckpt_cifar20_frozen" --data eval20.jsonl --tag _20
 python3 benchmarks/cifar100/eval_cifar.py "$LAYA_BENCH_DATA/ckpt_cifar_frozen"   --data eval.jsonl   --tag _100
 ```
 
-`--dataset 100` needs `--summary-over 0` today: `visual_plan` asks for one more visual token above
-`summary_for_options_over=96` and `PooledProjector` does not emit it, so the run refuses with
-`plan expects 17 visual tokens, got 16`. That is the `[VIS_SUMMARY]` gap
-`docs/vision-benchmark-results.md` §4 describes, not a harness bug.
+`--dataset 100` used to need `--summary-over 0`: above `summary_for_options_over=96` the plan
+asked for one more visual token than the projector emitted and the run refused with
+`plan expects 17 visual tokens, got 16`. The `[VIS_SUMMARY]` row is implemented as of v0.4.50
+(`docs/vision-benchmark-results.md` §4), so the default path is what to run.
+
+GPU runs name the HIP interpreter explicitly (`PYTHON=python3`). The repository's `.venv` is the
+CPU interpreter the CI gates use, and `gpuenv.sh` says so loudly if it is paired with the wrong
+torch build.
+
+## Scoring a `state_conditioned` checkpoint costs ~5x a joint one
+
+Each item is `k` rows rather than one, so the 5 000-row accuracy pass and both gates run
+proportionally more forward passes: a 20-option arm scored in ~30 min where the joint arm of the
+same size took ~7. Budget for it, and keep `--batch` at its default for the accuracy pass.
 
 ## Gate 1 needs `--batch 1`
 
