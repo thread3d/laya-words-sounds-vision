@@ -195,7 +195,7 @@ head_len=311 markers[0]=10 option_tokens=301 distinct=100
   summary=False n_visual=16 splice=311 marker0= 10 -> 100/100 markers land on a [MASK]
 ```
 
-`tests/test_vision.py::test_summary_token_shifts_markers_and_sits_before_the_first_option` pins the
+`tests/test_vision.py::test_a_high_cardinality_head_keeps_every_marker_on_its_mask_token` pins the
 plan's numbers (`marker_positions == [4, 6]`, `splice == 8`) but never checks that those positions
 still index `[MASK]` tokens in an assembled sequence — which is why the suite does not see it.
 
@@ -215,13 +215,25 @@ At 20 options every marker is inside it — and the 20-way run is the one that l
 is real; it is not yet a proof, because one 20-way variant with 64 visual tokens also failed
 (§5), so the geometry is necessary-looking but not sufficient-explaining.
 
-**Proposed fix, deliberately not landed.** `PooledProjector.forward(patches, summary=False)`
-appending one globally-pooled, projected row; `VisionEncoder.encode(pixels, summary=...)` forwarding
-it; the three plan call sites (`train.py:544`, `agent.py:1356`, `agent.py:1394`) passing
-`plan.summary`; and `visual_plan` placing that row at `splice = head_len` with
-`marker_positions` unchanged — the only placement consistent with `_cat`. That is a layout change
-affecting every vision checkpoint, so it wants a deliberate decision plus a test that asserts marker
-alignment, not a drive-by patch from a benchmark session.
+**Fixed since this was written (v0.4.50).** `PooledProjector.forward(patches, summary=True)`
+appends one globally-pooled, projected row; `VisionEncoder.encode(pixels, summary=...)` forwards
+it; `visual_plan` sizes the block for it; and the trainer, the agent and the frozen-patch path all
+decide from the same number — the item's own `option_tokens`, computed once in `make_item` — so the
+plan and the projector can no longer disagree. The markers no longer shift:
+`marker_positions = markers` and `splice = head_len`, which is the only placement consistent with
+`_cat`.
+
+**Measured on the real tokenizer, 100 options:** all 100 markers index a `[MASK]` token (0 of 100
+before), `plan.n_visual == n_visual_tokens + 1`, and `laya-train` builds and trains a 100-option
+vision checkpoint instead of refusing with `plan expects 17 visual tokens, got 16`. What this
+changes for the 100-way **accuracy** is not yet measured — the four collapses in §3.2 were all run
+with `summary_for_options_over: 0`, i.e. without the token, so the geometry they blamed is the
+geometry this fixes and the number has to be re-taken.
+
+The spec's second placement (a copy of the token in front of the first marker) is still not
+implemented: it needs a second splice point in `assemble_inputs_embeds`, which changes the layout
+of every vision checkpoint. It is worth doing only if the re-run shows the single token is not
+enough.
 
 ### 4.1 A third defect, found while scoring: mixed batches crash
 

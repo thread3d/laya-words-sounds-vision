@@ -341,6 +341,12 @@ One text sequence per question, exactly as today, with a visual block spliced in
   point, outside the 128-token local window. One extra token buys global reach in all 28 layers
   instead of 10.
 
+  **As built**, the token is the first of those two placements: one row appended to the block, and
+  the markers do not move for it. The second placement needs `assemble_inputs_embeds` to support a
+  splice point *before* the options as well as after them; it is deliberately left out until the
+  measurement says the one token is not enough, because a second splice changes the layout of
+  every vision checkpoint.
+
 **Type embedding is mandatory, not optional.** The encoder cannot tell a patch from a word at the
 same position (VisualBERT/UNITER/FLAVA all needed this). Add a 2-way `vis_emb` to the visual
 tokens at the embedding layer; it is one `nn.Embedding(2, d)` and it is the cheapest single thing
@@ -1638,7 +1644,7 @@ have to happen first.
 |---|---|---|---|---|
 | 2 | the six invariants (C1-C6) | **held** — no generation, typed answers, calibrated confidence, abstention, determinism, and byte-identical text sequences | everywhere | `test_vision.py` asserts the no-vision-block path explicitly |
 | 4.1 | visual-token layout, type vector, reserved position block | **implemented** | `laya/vision.py` (`vision_plan`, `assemble_inputs_embeds`, `PooledProjector`) | `test_vision.py` |
-| 4.1 | the `[VIS_SUMMARY]` token this section specifies | **not implemented** — `visual_plan` reserves the extra token for a head above `summary_for_options_over` and `PooledProjector` emits only `n_visual_tokens`, so such a head refuses to build (`plan expects 17 visual tokens, got 16`), which is why no high-cardinality vision checkpoint can be trained today. The plan's marker shift is also inconsistent with `assemble_inputs_embeds`, which splices *at* the splice point | `laya/vision.py` (`vision_plan`, `PooledProjector`) | none — see `vision-benchmark-results.md` §4 |
+| 4.1 | the `[VIS_SUMMARY]` token | **implemented, after the block only** — `PooledProjector.forward(..., summary=True)` appends one globally pooled, projected row when the head crosses `summary_for_options_over`, and `visual_plan` sizes the block for it. The spec's second placement (one more copy in front of the first marker) is **not** implemented: it would need a second splice point in `assemble_inputs_embeds`, and the measurement in `vision-benchmark-results.md` §4 is what decides whether it is needed | `laya/vision.py` (`visual_plan`, `PooledProjector`, `VisionEncoder.encode`) | `test_vision.py` — a 100-option head keeps all 100 markers on `[MASK]` |
 | 4.1.1 | option independence (state-conditioned scoring) | **implemented** as `option_layout="state_conditioned"` | `laya/agent.py` | `test_state_conditioned.py` — permuting options does not change the answer |
 | 4.2 | vision tower, `keep_layers` truncation | **implemented** | `laya/vision.py` (`load_tower`) | `test_vision.py` |
 | 4.3 | compression | **baseline only**: `adaptive_avg` / `none`. Coarse-to-fine is *measurement-gated* by the spec itself, and the Perceiver resampler is deliberately absent | `PooledProjector` | `test_vision.py` |

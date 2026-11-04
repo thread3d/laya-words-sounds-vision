@@ -206,8 +206,12 @@ def visual_plan(vision: VisionConfig, text_len: int, markers: Sequence[int], hea
     """Lay the visual block out inside a sequence of `text_len` tokens.
 
     `head_len` is ``len(build_head(...))`` -- the splice point. `markers` are ``build_head``'s
-    marker positions, which sit *before* the splice and therefore never move, unless a summary
-    token is emitted in front of the first option, which shifts all of them by one.
+    marker positions, which sit *before* the splice and therefore never move: the whole block,
+    summary row included, is inserted after them (`assemble_inputs_embeds` splices *at*
+    `splice`). Shifting the markers for the summary token was wrong in both directions -- it
+    compensated for an insertion in front of the options that never happens, and it moved every
+    marker off its `[MASK]` token (measured on the real tokenizer: 100 options, 0/100 markers on
+    a `[MASK]` with the shift, 100/100 without).
     """
     if vision.slot != "after_options":                      # pragma: no cover - guarded at load
         raise ValueError("unsupported vision slot %r" % (vision.slot,))
@@ -224,8 +228,8 @@ def visual_plan(vision: VisionConfig, text_len: int, markers: Sequence[int], hea
             "vision.n_visual_tokens, shorten the state, or raise max_len for this checkpoint."
             % (text_len, n_visual, length, max_len))
 
-    splice = head_len + (1 if summary else 0)
-    marker_positions = [m + (1 if summary else 0) for m in markers]
+    splice = head_len
+    marker_positions = list(markers)
 
     if vision.position_policy == "contiguous":
         # The block continues the numbering where the head left off, and the text after it shifts
@@ -337,11 +341,21 @@ class PooledProjector:
         self.type_vector.data = self.type_vector.data.to(device)
         return self
 
-    def __call__(self, patches):
-        return self.forward(patches)
+    def __call__(self, patches, summary: bool = False):
+        return self.forward(patches, summary=summary)
 
-    def forward(self, patches):
-        """`patches` ``[B, N, C]`` -> ``[B, n_visual_tokens, hidden]``."""
+    def forward(self, patches, summary: bool = False):
+        """`patches` ``[B, N, C]`` -> ``[B, n_visual_tokens (+1), hidden]``.
+
+        `summary=True` appends the ``[VIS_SUMMARY]`` row (spec §4.1): the *globally* pooled patch
+        vector, projected through the same map and type vector as the rows above it. It is the one
+        token in the block that sees every patch, which is what a high-cardinality head needs --
+        above ~30 options the last markers sit past the encoder's 128-token local window and can
+        only reach the picture through a token that already pooled it.
+
+        The same type vector on purpose: it *is* a visual token, and reusing it keeps the projector
+        parameter set -- and therefore every saved `vision.safetensors` -- unchanged.
+        """
         torch = _torch()
         x = patches
         if self.pooling == "adaptive_avg":
@@ -349,7 +363,11 @@ class PooledProjector:
             x = x.transpose(1, 2)
         elif self.pooling != "none":
             raise ValueError("unknown pooling %r" % (self.pooling,))
-        return self.proj(x) + self.type_vector
+        out = self.proj(x) + self.type_vector
+        if summary:
+            pooled = self.proj(patches.mean(dim=1, keepdim=True)) + self.type_vector
+            out = torch.cat([out, pooled], dim=1)
+        return out
 
 
 class VisionEncoder:
@@ -418,15 +436,15 @@ class VisionEncoder:
                             "got %s" % type(out).__name__)
         return patches
 
-    def encode(self, pixel_values):
-        """``[B, 3, H, W]`` pixels in [0, 1] -> ``[B, n_visual_tokens, hidden]`` embeddings.
+    def encode(self, pixel_values, summary: bool = False):
+        """``[B, 3, H, W]`` pixels in [0, 1] -> ``[B, n_visual_tokens (+1), hidden]`` embeddings.
 
         Pixel normalisation happens in :meth:`encode_patches`, because it belongs to the tower:
         SigLIP's processor rescales 1/255 and then maps [0, 1] through (x - mean) / std with
         0.5/0.5, so a caller handing over raw [0, 1] pixels would otherwise feed the tower values it
         was never trained on. Both constants are config fields so a different tower can move them.
         """
-        return self.projector(self.encode_patches(pixel_values))
+        return self.projector(self.encode_patches(pixel_values), summary=summary)
 
     def _tower_trains(self) -> bool:
         for p in self.tower.parameters():
@@ -723,12 +741,14 @@ class VisualCache:
         self.misses = 0
 
     @staticmethod
-    def key(pixels) -> str:
+    def key(pixels, summary: bool = False) -> str:
+        """Content key for `pixels`; `summary` is part of it, because it changes the block's width."""
         import hashlib
-        return hashlib.sha256(pixels.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+        digest = hashlib.sha256(pixels.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+        return digest + ("|summary" if summary else "")
 
-    def get_or_encode(self, pixels, encode):
-        k = self.key(pixels)
+    def get_or_encode(self, pixels, encode, summary: bool = False):
+        k = self.key(pixels, summary)
         if k in self._store:
             self.hits += 1
             self._store.move_to_end(k)

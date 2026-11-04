@@ -114,14 +114,56 @@ def test_block_lands_after_the_head_and_markers_do_not_move():
     assert p.length == 28
 
 
-def test_summary_token_shifts_markers_and_sits_before_the_first_option():
+def test_the_summary_token_extends_the_block_and_leaves_the_markers_alone():
+    """The [VIS_SUMMARY] row is spliced *with* the block, after the options -- not in front of them.
+
+    This used to assert `marker_positions == [4, 6]` and `splice == 8`, i.e. every marker shifted by
+    one. Nothing is inserted in front of the options: `assemble_inputs_embeds` splices the block at
+    `splice`, which is after all of them. So the shift moved every marker onto its neighbour's
+    token, and on a real tokenizer 0 of 100 markers landed on a `[MASK]` while 100 of 100 did
+    without it. The numbers below are the alignment, not just the arithmetic.
+    """
     v = _plan()
     markers = [3, 5]
     p = visual_plan(v, text_len=20, markers=markers, head_len=7, max_len=512, option_tokens=400)
     assert p.summary is True
-    assert p.n_visual == 9, p.n_visual            # 8 patch tokens + 1 summary
-    assert p.marker_positions == [4, 6], p.marker_positions
-    assert p.splice == 8, p.splice
+    assert p.n_visual == 9, p.n_visual            # 8 patch tokens + 1 summary row
+    assert p.marker_positions == markers, p.marker_positions
+    assert p.splice == 7, p.splice
+
+
+def test_a_high_cardinality_head_keeps_every_marker_on_its_mask_token():
+    """The property the plan's numbers were only ever a proxy for, checked on a real sequence.
+
+    A 100-option head crosses `summary_for_options_over`, so the block carries the summary row.
+    Every marker must still index a `[MASK]` token in the assembled sequence, and the block must be
+    exactly as wide as the plan says -- which is what `assemble_inputs_embeds` enforces, and what
+    `[VIS_SUMMARY]` being unimplemented made impossible (the plan asked for one more row than the
+    projector emitted, so the run refused before it started).
+    """
+    v = _plan()
+    p = visual_plan(v, text_len=200, markers=[10, 12, 14], head_len=20, max_len=512,
+                    option_tokens=180)
+    assert p.summary is True and p.n_visual == 9
+    assert [m for m in p.marker_positions] == [10, 12, 14]
+
+    from laya.common import build_head
+
+    tok = _stub_tokenizer()
+    q = {"t": "choice", "ins": "pick", "crit": {"class %d" % i: None for i in range(100)}}
+    head_ids, head_markers, _stats = build_head(tok, q, 512)
+    tokens = len(head_ids) - head_markers[0]
+    assert tokens > v.summary_for_options_over, "the head must cross the threshold, got %d" % tokens
+    on_mask = sum(1 for m in head_markers if head_ids[m] == tok.mask_token_id)
+    assert on_mask == len(head_markers), "%d/%d markers sit on a [MASK]" % (on_mask, len(head_markers))
+
+    # ... and the plan the trainer would build for that head must agree, marker for marker.
+    p100 = visual_plan(v, text_len=len(head_ids) + 5, markers=head_markers, head_len=len(head_ids),
+                       max_len=1024, option_tokens=tokens)
+    assert p100.summary is True
+    assert list(p100.marker_positions) == list(head_markers), p100.marker_positions[:4]
+    assert p100.splice == len(head_ids)
+    assert p100.n_visual == v.n_visual_tokens + 1
 
 
 def test_the_default_position_policy_keeps_the_block_adjacent():
@@ -614,14 +656,33 @@ def test_agent_attaches_a_visual_block_and_shifts_nothing_else():
 
 
 def test_the_tower_runs_once_for_many_questions_on_one_image():
+    """One picture, one tower pass -- counted at the tower, not at the cache.
+
+    The block is now built inside the question loop (whether it carries a `[VIS_SUMMARY]` row is a
+    property of the head, not of the state), so the cache is consulted once per question. What must
+    not change is the number of tower passes: exactly one per distinct picture.
+    """
     agent = _vision_agent()
     internal = {q: agent._to_internal({"type": "choice", "instructions": "pick",
                                        "criteria": ["a", "b"]}) for q in ("q1", "q2", "q3")}
+    calls = {"n": 0}
+    real_tower = agent.vision_encoder.tower
+
+    class _Counting:
+        def __call__(self, *a, **kw):
+            calls["n"] += 1
+            return real_tower(*a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(real_tower, name)
+
+    agent.vision_encoder.tower = _Counting()
     before = agent._visual_cache.misses
     agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q1", "q2", "q3"], internal)
-    assert agent._visual_cache.misses - before == 1, "one image, one tower pass (spec 4.6)"
+    assert calls["n"] == 1, "three questions about one picture cost one tower pass, got %d" % calls["n"]
+    assert agent._visual_cache.misses - before == 1
     agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q1"], internal)
-    assert agent._visual_cache.hits == 1, "the same pixels must hit the cache"
+    assert calls["n"] == 1 and agent._visual_cache.hits >= 1, "the same pixels must hit the cache"
 
 
 def test_visual_collate_builds_inputs_embeds():
@@ -1284,7 +1345,8 @@ if __name__ == "__main__":
     test_visual_positions_never_collide_with_text_positions()
     test_explicit_offset_is_honoured_and_bounds_checked()
     test_block_lands_after_the_head_and_markers_do_not_move()
-    test_summary_token_shifts_markers_and_sits_before_the_first_option()
+    test_the_summary_token_extends_the_block_and_leaves_the_markers_alone()
+    test_a_high_cardinality_head_keeps_every_marker_on_its_mask_token()
     test_the_default_position_policy_keeps_the_block_adjacent()
     test_the_reserved_policy_is_still_available_and_is_far_away()
     test_budget_overflow_is_refused_with_the_arithmetic()

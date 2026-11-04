@@ -351,7 +351,11 @@ def make_item(tok, q: Dict[str, Any], target: Sequence[float], state_ids: List[i
     if max_len is not None and markers and markers[-1] >= max_len:
         return None, "options_beyond_max_len"
     return {"q": q, "state_ids": state_ids, "target": [float(v) for v in target],
-            "qtype": QTYPES[q["t"]], "k": k}, None
+            "qtype": QTYPES[q["t"]], "k": k,
+            # How many tokens the options themselves render to. `visual_plan` decides whether the
+            # block gets a `[VIS_SUMMARY]` row from this number, and the projector that emits the
+            # block has to make the same decision -- so it is computed once, here, and carried.
+            "option_tokens": (len(_ids) - markers[0]) if markers else 0}, None
 
 
 def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
@@ -598,7 +602,8 @@ def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
                                     only_option=only_option)
         plan = visual_plan(vision, text_len=len(ids), markers=markers, head_len=len(head_ids),
                            max_len=max_len, max_position_embeddings=max_positions,
-                           option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                           option_tokens=item.get(
+                               "option_tokens", (len(head_ids) - markers[0]) if markers else 0))
         encoded["visual"] = visual
         encoded["plan"] = plan
         encoded["markers"] = plan.marker_positions
@@ -853,14 +858,24 @@ def _visual_encoder_fn(encoder):
     return encode
 
 
-def _project_visual(item, projector):
-    """Run the trainable projector over a cached patch buffer, inside the graph."""
+def _project_visual(item, projector, vision=None):
+    """Run the trainable projector over a cached patch buffer, inside the graph.
+
+    `vision` is what decides whether the block carries a `[VIS_SUMMARY]` row. The block's width and
+    `visual_plan`'s expectation have to agree, and they are computed in two different places: the
+    plan from the item's own option-token count, the block here. Passing the same item to both is
+    what keeps them equal -- without the flag the projector emits `n_visual_tokens` rows for a head
+    the plan sized at `n_visual_tokens + 1`, which is the `plan expects 17 visual tokens, got 16`
+    refusal that made every high-cardinality vision run impossible.
+    """
     patches = item.get("visual_patches")
     if patches is None:
         return item
+    summary = bool(vision is not None and "option_tokens" in item
+                   and vision.summary_wanted(item["option_tokens"]))
     device = next(iter(projector.parameters())).device
     projected = dict(item)
-    projected["visual"] = projector(patches.unsqueeze(0).to(device))[0]
+    projected["visual"] = projector(patches.unsqueeze(0).to(device), summary=summary)[0]
     return projected
 
 
@@ -992,7 +1007,7 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
             for position, it in enumerate(window):
                 dropped = bool(vision is not None and config.modality_dropout
                                and order_rng.random() < config.modality_dropout)
-                source = it if (dropped or projector is None) else _project_visual(it, projector)
+                source = it if (dropped or projector is None) else _project_visual(it, projector, vision)
                 order = draw_option_order(it, order_rng, config.shuffle_options)
                 if state_conditioned:
                     # One row per option. The row's own target is the weight that option carries
@@ -1081,7 +1096,7 @@ def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: tor
     for start in range(0, len(items), batch_size):
         chunk = items[start:start + batch_size]
         if vision is not None and projector is not None:
-            chunk = [_project_visual(it, projector) for it in chunk]
+            chunk = [_project_visual(it, projector, vision) for it in chunk]
         # A state-conditioned checkpoint reads one row per option, so evaluation has to encode
         # that way too. Building a joint row and slicing `row[:k]` out of a one-marker row does not
         # fail -- it silently scores a sequence the checkpoint never saw, and reports chance-level

@@ -1243,12 +1243,16 @@ class Agent(HookRegistry):
             table = emb.word_embeddings
         return table(ids.to(table.weight.device))
 
-    def _visual_block(self, image_spec):
+    def _visual_block(self, image_spec, summary: bool = False):
         """Encode one image into the visual block, memoised by the hash of its pixels.
 
         The tower pass is the expensive half of a vision decision, and a call that asks several
         questions about one image must not pay it several times (spec §4.6). The cache is keyed on
         normalised pixels, so two encodings of the same picture are one entry.
+
+        `summary` appends the [VIS_SUMMARY] row, which `visual_plan` asked for from this head's own
+        option count. It is part of the cache key: the same picture asked at two cardinalities is
+        two blocks of different width, and reusing one for the other fails the splice.
         """
         if self.vision is None:                                   # pragma: no cover - guarded
             raise ValueError("this checkpoint has no vision support")
@@ -1277,9 +1281,9 @@ class Agent(HookRegistry):
 
         def encode(px):
             with torch.no_grad():
-                return encoder.encode(px.unsqueeze(0).to(self.device))[0]
+                return encoder.encode(px.unsqueeze(0).to(self.device), summary=summary)[0]
 
-        block = self._visual_cache.get_or_encode(pixels, encode)
+        block = self._visual_cache.get_or_encode(pixels, encode, summary=summary)
         # Match the token embedding table: `assemble_inputs_embeds` concatenates the two, and a
         # bf16 checkpoint against an fp32 projector would raise inside torch.cat.
         return block.to(self.device, dtype=self._embed_dtype())
@@ -1304,12 +1308,12 @@ class Agent(HookRegistry):
         # Vision: a state may carry an image. Only when this checkpoint has vision support, so a
         # text checkpoint never has a state reshaped underneath it (spec C6).
         visual = None
+        image_spec = None
         text_len_budget = max_len
         vision_cfg = getattr(self, "vision", None)
         if vision_cfg is not None:
             state, image_spec = split_state(state)
             if image_spec is not None:
-                visual = self._visual_block(image_spec)
                 text_len_budget = max_len - vision_cfg.n_visual_tokens
                 if text_len_budget < 16:
                     raise ValueError(
@@ -1348,16 +1352,22 @@ class Agent(HookRegistry):
                     item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]],
                             "options": stats, "state_stats": state_stats,
                             "option_group": (qid, slot),
-                            "modality": MODALITY_IMAGE if visual is not None else MODALITY_TEXT}
-                    if visual is not None:
+                            "modality": MODALITY_IMAGE if image_spec is not None else MODALITY_TEXT}
+                    if image_spec is not None:
                         head_ids, _, _ = build_head(self.tok, q, head_max_len,
                                                     option_order=q.get("option_order"),
                                                     only_option=slot)
+                        option_tokens = (len(head_ids) - markers[0]) if markers else 0
+                        # The block and the plan are sized from the same number: the projector
+                        # emits `n_visual_tokens`, plus the [VIS_SUMMARY] row when this head's
+                        # options cross the configured threshold (spec 4.1).
+                        visual = self._visual_block(
+                            image_spec, vision_cfg.summary_wanted(option_tokens))
                         plan = visual_plan(
                             vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
                             max_len=max_len,
                             max_position_embeddings=self.model.encoder.config.max_position_embeddings,
-                            option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                            option_tokens=option_tokens)
                         item["visual"] = visual
                         item["plan"] = plan
                         item["markers"] = plan.marker_positions
@@ -1387,15 +1397,17 @@ class Agent(HookRegistry):
                     % (qid, len(markers), n_opts, max_len, head_max_len))
             item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
                     "state_stats": state_stats,
-                    "modality": MODALITY_IMAGE if visual is not None else MODALITY_TEXT}
-            if visual is not None:
+                    "modality": MODALITY_IMAGE if image_spec is not None else MODALITY_TEXT}
+            if image_spec is not None:
                 head_ids, _, _ = build_head(self.tok, q, head_max_len,
                                             option_order=q.get("option_order"))
+                option_tokens = (len(head_ids) - markers[0]) if markers else 0
+                visual = self._visual_block(image_spec, vision_cfg.summary_wanted(option_tokens))
                 plan = visual_plan(
                     vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
                     max_len=max_len,
                     max_position_embeddings=self.model.encoder.config.max_position_embeddings,
-                    option_tokens=(len(head_ids) - markers[0]) if markers else 0)
+                    option_tokens=option_tokens)
                 item["visual"] = visual
                 item["plan"] = plan
                 item["markers"] = plan.marker_positions
