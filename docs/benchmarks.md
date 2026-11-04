@@ -6,6 +6,12 @@ to find a comparable run before choosing a checkpoint or a confidence threshold.
 [research directory](https://github.com/NandhaKishorM/laya/tree/main/research) holds the scripts
 and result files behind the main tables.
 
+The vision path's real-data benchmark has its own recipe next to the code it measures: the
+[CIFAR-100 harness](https://github.com/thread3d/laya-words-sounds-vision/tree/main/benchmarks/cifar100)
+(`benchmarks/cifar100/`) turns CIFAR-100 into 20- and 100-option `choice` questions, runs the
+controls and both release gates, and reproduces the tables in
+[the vision benchmark results](vision-benchmark-results.md).
+
 ## Find the relevant measurement
 
 | If you need to assess | Start with | Check before applying the result |
