@@ -657,6 +657,38 @@ def test_the_batch_forward_runs_and_answers():
     assert act.shape[0] == 1
 
 
+def test_a_batch_may_mix_a_picture_with_a_text_only_state():
+    """`predict_batch([{"image_path": p}, {"text": "hello"}])` raised `KeyError: 'visual'`.
+
+    `collate_visual` took `n_visual` from `items[0]` and indexed `it["visual"]` on every row, so a
+    batch that mixed an image state with a text state crashed -- although `collate_training_batch`
+    documents the opposite ("the ones without simply have none") and `predict_batch`'s contract
+    allows the mixture. It is also the batched form of gate 1, the image-removed half of
+    `laya-evals ablate`, which therefore could not be measured in one pass at all.
+    """
+    agent = _vision_agent()
+    internal = {"q": agent._to_internal({"type": "choice", "instructions": "pick",
+                                         "criteria": ["a", "b"]})}
+    seen = agent._encode_state({"image": {"pixels": torch.zeros(3, 224, 224)}}, ["q"], internal)
+    blind = agent._encode_state({"text": "hello"}, ["q"], internal)
+    assert "visual" not in blind[0]
+
+    from laya.vision import collate_visual
+    b = collate_visual(seen + blind, agent._token_embeddings, agent.tok.pad_token_id)
+    assert b["inputs_embeds"].shape[0] == 2
+    # The picture row marks its own block; the text row has none and is not given a fake one.
+    assert bool(b["visual_mask"][0].any()), "the image row lost its visual mask"
+    assert not bool(b["visual_mask"][1].any()), "the text row must not be marked as carrying a picture"
+    # Its positions are the plain 0..L-1 a text-only batch would get; a neighbour's block must not
+    # shift this row's RoPE distances.
+    n = int(b["attention_mask"][1].sum())
+    assert b["position_ids"][1, :n].tolist() == list(range(n)), b["position_ids"][1, :n].tolist()
+
+    with torch.no_grad():
+        logits, _act = agent._infer(b)
+    assert tuple(logits.shape)[0] == 2, logits.shape
+
+
 def test_a_vision_checkpoint_refuses_the_fast_backend_message():
     """The guard lives in Agent.__init__; assert the message a caller would see."""
     import inspect
@@ -1241,6 +1273,7 @@ def _token_table(model):
 
 
 if __name__ == "__main__":
+    test_a_batch_may_mix_a_picture_with_a_text_only_state()
     test_no_block_means_no_vision_config()
     test_explicitly_disabled_block_parses_to_none()
     test_block_is_validated_and_defaulted()
