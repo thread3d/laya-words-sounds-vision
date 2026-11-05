@@ -290,6 +290,29 @@ in
       '';
     };
 
+    maxAudioBytes = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 8388608;
+      description = ''
+        Largest recording a request state may carry, in bytes (sets
+        `LAYA_MAX_AUDIO_BYTES`). A bigger one is refused with 413 before it is
+        decoded. null leaves the server's own default (12 MB).
+      '';
+    };
+
+    maxAudioSeconds = lib.mkOption {
+      type = lib.types.nullOr lib.types.positive;
+      default = null;
+      example = 60;
+      description = ''
+        Longest recording the server will decode, in seconds (sets
+        `LAYA_MAX_AUDIO_SECONDS`). Checked against the WAV/FLAC/Ogg/MP3 header
+        first, so a long file is refused without a decoder ever running. null
+        leaves the server's own default (120).
+      '';
+    };
+
     allowImageUrls = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -299,6 +322,17 @@ in
         an SSRF primitive pointed at its own network. Only http and https are
         fetched even when on, and a deployment that enables it should put its own
         egress policy in front.
+      '';
+    };
+
+    allowAudioUrls = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Fetch an `audio_url` reference (sets `LAYA_ALLOW_AUDIO_URLS`). Off by
+        default for the image path's reason: a server that fetches whatever URL a
+        request names is an SSRF primitive pointed at its own network. Only http
+        and https are fetched even when on.
       '';
     };
 
@@ -450,6 +484,12 @@ in
         LAYA_MAX_IMAGE_BYTES = toString cfg.maxImageBytes;
       } // lib.optionalAttrs (cfg.maxImagePixels != null) {
         LAYA_MAX_IMAGE_PIXELS = toString cfg.maxImagePixels;
+      } // lib.optionalAttrs (cfg.maxAudioBytes != null) {
+        LAYA_MAX_AUDIO_BYTES = toString cfg.maxAudioBytes;
+      } // lib.optionalAttrs (cfg.maxAudioSeconds != null) {
+        LAYA_MAX_AUDIO_SECONDS = toString cfg.maxAudioSeconds;
+      } // lib.optionalAttrs (cfg.allowAudioUrls != null) {
+        LAYA_ALLOW_AUDIO_URLS = if cfg.allowAudioUrls then "1" else "0";
       } // {
         LAYA_ALLOW_IMAGE_URLS = if cfg.allowImageUrls then "1" else "0";
       } // lib.optionalAttrs (cfg.tournamentGroup != null) {

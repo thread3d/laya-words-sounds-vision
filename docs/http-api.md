@@ -51,6 +51,9 @@ Everything is environment variables, so one image serves a laptop dev run and a 
 | `LAYA_MAX_IMAGE_BYTES` | largest image, in bytes, a request state may carry; a bigger one is a `413` refused before it is decoded | `12582912` (12 MB) |
 | `LAYA_MAX_IMAGE_PIXELS` | largest image, in **pixels**, the server will decode. Checked against the PNG/JPEG/GIF/WebP header first, so a small file that declares an enormous picture is refused without a decoder ever running | `16777216` (4096x4096) |
 | `LAYA_ALLOW_IMAGE_URLS` | fetch `image_url` references. Off by default: a self-hosted engine that fetches any URL a request names is an SSRF primitive pointed at the operator's own network. Only `http` and `https` are fetched, even when on | `0` |
+| `LAYA_MAX_AUDIO_BYTES` | largest recording, in bytes, a request state may carry; a bigger one is a `413` refused before it is decoded | `12582912` (12 MB) |
+| `LAYA_MAX_AUDIO_SECONDS` | longest recording, in seconds, the server will decode. Checked against the WAV/FLAC/Ogg/MP3 header first, so a long file is refused without a decoder ever running | `120` |
+| `LAYA_ALLOW_AUDIO_URLS` | fetch `audio_url` references. Off by default for the image path's reason; only `http` and `https` are fetched, even when on | `0` |
 | `LAYA_JEV_STRICT` | serve the strict Jev wire contract: no root `routing`, no per-answer `action` / `answer_confidence`, no `confidence` on noul answers, and `usage` reduced to `input_tokens` + `output_tokens`. For clients that validate the response against the Jev contract with no extra fields | `0` |
 | `LAYA_TOURNAMENT_GROUP` | answer a `choice` with more options than this by elimination, in groups of this size, on `/v1/systemone` and `/v1/systemone/batch`, and raise their option cap from 100 to 255. See [Large choices](#large-choices-laya_tournament_group). Unset, or outside 2 to 100, is off | `0` |
 
@@ -228,6 +231,22 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 
 `image_url` is refused unless `LAYA_ALLOW_IMAGE_URLS=1`: a self-hosted engine that fetches any URL
 a caller names is an SSRF primitive pointed at the operator's own network.
+
+A state may carry a **recording** the same way: `audio_path`, `audio_base64`, or `audio` holding one
+of those (a client cannot send raw bytes as JSON). `LAYA_MAX_AUDIO_BYTES` and `LAYA_MAX_AUDIO_SECONDS`
+bound it, both checked on the container header before any decoder runs, and `audio_url` is refused
+unless `LAYA_ALLOW_AUDIO_URLS=1`. A sound state routes to the audio checkpoint when one is registered.
+
+```bash
+curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
+  "state": {"audio_base64": "'"$(base64 -w0 clip.wav)"'", "text": "is this a dog barking?"},
+  "questions": {"sound": {"type": "choice", "instructions": "What is this sound?",
+                          "criteria": ["a dog", "a car", "a door"]}}
+}'
+```
+
+A state carries a picture or a sound, not both, and `POST /v1/systemone/batch` refuses a batch that
+mixes the two: one batch is one forward pass with one spliced block per row.
 
 | field | required | meaning |
 |---|---|---|

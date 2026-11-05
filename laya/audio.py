@@ -494,8 +494,14 @@ class AudioRefused(Refused):
 
 
 def allow_audio_urls() -> bool:
-    """Whether this deployment fetches an ``audio_url`` reference. Off unless explicitly asked."""
-    return os.environ.get(ALLOW_AUDIO_URLS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    """Whether this deployment fetches an ``audio_url`` reference. Off unless explicitly asked.
+
+    The name is spelled out in the lookup rather than read through `ALLOW_AUDIO_URLS_ENV`, because
+    the repository's own checks derive the set of variables the package reads by scanning for
+    ``environ.get("LAYA_...")``: a variable reached through a constant is read and invisible.
+    """
+    return os.environ.get("LAYA_ALLOW_AUDIO_URLS", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def audio_info(data) -> Optional[Dict[str, Any]]:

@@ -224,31 +224,36 @@ def validate_questions(questions: Any) -> dict:
 # request bodies does not exist for a conversation. A path or a URL costs one line.
 IMAGE_REFERENCE_KEYS = ("image", "image_path", "image_url")
 IMAGE_INLINE_KEYS = ("image_base64",)
+AUDIO_INLINE_KEYS = ("audio_base64",)
 
 
 def validate_state(state: Any) -> dict:
-    """A non-empty state object, with image *references* allowed and inline bytes refused.
+    """A non-empty state object, with media *references* allowed and inline bytes refused.
 
     A vision checkpoint takes ``{"image_path": ...}`` or ``{"image_url": ...}`` (or ``"image"``
-    holding one of those); this door only checks the shape, because the transport limits belong to
-    the server that actually reads the bytes. What it will not accept is ``image_base64``: see
-    `IMAGE_INLINE_KEYS`.
+    holding one of those), and an audio one takes ``{"audio_path": ...}`` / ``{"audio_url": ...}``
+    the same way; this door only checks the shape, because the transport limits belong to the server
+    that actually reads the bytes. What it will not accept is base64 inline: see
+    `IMAGE_INLINE_KEYS` and `AUDIO_INLINE_KEYS`.
     """
     if not isinstance(state, dict) or not state:
         raise ToolError("invalid_state", "state must be a non-empty JSON object")
-    inline = [key for key in IMAGE_INLINE_KEYS if key in state]
+    inline = [key for key in IMAGE_INLINE_KEYS + AUDIO_INLINE_KEYS if key in state]
     if inline:
         raise ToolError(
             "invalid_state",
-            "state carries %s; an MCP tool argument must not carry inline image bytes. Pass "
-            "\"image_path\" (a file the server can read) or \"image_url\" instead."
+            "state carries %s; an MCP tool argument must not carry inline media bytes. Pass a "
+            "reference the server can read instead -- \"image_path\"/\"image_url\" for a "
+            "picture, \"audio_path\"/\"audio_url\" for a recording."
             % ", ".join(sorted(inline)))
-    image = state.get("image")
-    if isinstance(image, dict) and "base64" in image:
-        raise ToolError(
-            "invalid_state",
-            "state['image'] carries inline base64; pass a path or a URL instead, e.g. "
-            "{\"image\": {\"path\": \"invoice.png\"}}")
+    for key, noun, example in (("image", "image", "invoice.png"),
+                               ("audio", "sound", "clip.wav")):
+        media = state.get(key)
+        if isinstance(media, dict) and "base64" in media:
+            raise ToolError(
+                "invalid_state",
+                "state[%r] carries inline base64; pass a path or a URL instead, e.g. "
+                "{%r: {\"path\": %r}}" % (key, key, example))
     return dict(state)
 
 

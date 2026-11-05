@@ -64,6 +64,15 @@ env var                    meaning                                        defaul
                            default: fetching any URL a request names is an
                            SSRF primitive aimed at the operator's own
                            network. Only http/https, even when on
+``LAYA_MAX_AUDIO_BYTES``   largest recording a request state may carry, in  12582912
+                           bytes; a bigger one is refused with 413 before
+                           it is decoded
+``LAYA_MAX_AUDIO_SECONDS`` longest recording the server will decode, in     120
+                           seconds. Checked against the WAV/FLAC/Ogg/MP3
+                           header first, so a long file is refused without
+                           a decoder running
+``LAYA_ALLOW_AUDIO_URLS``  fetch an ``audio_url`` reference. Off by default   0
+                           for the image path's reason; only http/https
 ``LAYA_JEV_STRICT``        if set, serve the strict Jev wire contract: no   0
                            root `routing`, no per-answer `action` /
                            `answer_confidence`, no `confidence` on noul
@@ -94,6 +103,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+from . import audio as _audio
 from . import vision as _vision
 
 # A failed inference is reported to the client as a fixed 500 so nothing about paths,
@@ -1087,6 +1097,72 @@ def _resolve_image_state(state: Any) -> Any:
     return rest
 
 
+# Sound transport. A request may carry a recording in its state; the server owns the fetch, the
+# byte cap and the duration cap, and hands the model raw container bytes. The duration cap is
+# checked against the *header* before any decoder runs, because an hour of 48 kHz stereo fits inside
+# a 12 MB compressed file and decoding it first is how a single request costs gigabytes.
+AUDIO_REQUEST_KEYS = ("audio", "audio_path", "audio_url", "audio_base64")
+
+
+def _audio_urls_allowed() -> bool:
+    return _audio.allow_audio_urls()
+
+
+def _resolve_audio_state(state: Any) -> Any:
+    """Validate a recording carried in `state` and replace it with the raw container bytes.
+
+    Returns `state` unchanged when it carries no sound -- every request a text or vision deployment
+    serves -- so those paths are untouched. A refused recording is a 400 with the reason, except an
+    oversize one, which is a 413 like an oversized body.
+    """
+    from fastapi import HTTPException      # lazy: `import laya.serve` must not pull fastapi in
+
+    if not isinstance(state, dict):
+        return state
+    present = [key for key in AUDIO_REQUEST_KEYS if key in state]
+    if not present:
+        return state
+    if len(present) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="state carries more than one sound key (%s); send exactly one"
+                   % ", ".join(sorted(present)))
+    key = present[0]
+    spec = state[key]
+    if key in ("audio_path", "audio_url", "audio_base64") and isinstance(spec, str):
+        spec = {key[len("audio_"):]: spec}
+    try:
+        data = _audio.read_audio_bytes(
+            spec,
+            max_bytes=_image_limit("LAYA_MAX_AUDIO_BYTES",
+                                   os.environ.get("LAYA_MAX_AUDIO_BYTES"),
+                                   _audio.MAX_AUDIO_BYTES),
+            max_seconds=_seconds_limit("LAYA_MAX_AUDIO_SECONDS",
+                                       os.environ.get("LAYA_MAX_AUDIO_SECONDS"),
+                                       _audio.MAX_AUDIO_SECONDS),
+            allow_url=_audio_urls_allowed())
+    except _audio.AudioRefused as exc:
+        raise HTTPException(
+            status_code=413 if exc.reason in ("audio_too_large", "audio_too_long") else 400,
+            detail="%s: %s" % (exc.reason, exc.detail)) from exc
+    rest = {k: v for k, v in state.items() if k not in AUDIO_REQUEST_KEYS}
+    rest["audio"] = {"bytes": data}
+    return rest
+
+
+def _seconds_limit(name: str, raw: Optional[str], default: float) -> float:
+    """A positive duration in seconds, or the deployment's default."""
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError("%s must be a number of seconds, got %r" % (name, raw))
+    if value <= 0:
+        raise ValueError("%s must be positive, got %r" % (name, raw))
+    return value
+
+
 def _state_text_view(state: Any) -> Any:
     """`state` with any resolved image bytes replaced, so it can be measured as text.
 
@@ -1097,10 +1173,12 @@ def _state_text_view(state: Any) -> Any:
     """
     if not isinstance(state, dict):
         return state
-    image = state.get("image")
-    if isinstance(image, dict) and isinstance(image.get("bytes"), (bytes, bytearray)):
-        return dict(state, image={"bytes": "<%d bytes>" % len(image["bytes"])})
-    return state
+    replaced = dict(state)
+    for key in ("image", "audio"):
+        value = state.get(key)
+        if isinstance(value, dict) and isinstance(value.get("bytes"), (bytes, bytearray)):
+            replaced[key] = {"bytes": "<%d bytes>" % len(value["bytes"])}
+    return replaced
 
 
 def _state_length(state: Any) -> int:
@@ -1696,6 +1774,9 @@ def create_app(router: Optional[Any] = None):
         # it: the byte and pixel caps belong to the transport, and a refused image must never reach
         # a decoder, let alone the model.
         state = _resolve_image_state(state)
+        # The same treatment for a recording: transport limits before anything measures or decodes
+        # it, and the model receives raw container bytes.
+        state = _resolve_audio_state(state)
         _check_request_limits(state, questions, MAX_TOURNAMENT_CHOICE_OPTIONS if tournament_group
                               else MAX_CHOICE_OPTIONS)
         _refuse_body_refusals(body)

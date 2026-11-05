@@ -182,6 +182,12 @@ Laya does not open a network port.
 
 On `laya_route`, `laya_predict`, `laya_shortlist`, `laya_tournament`, and `laya_decide`, `model` may be omitted or set to `null`; either form resolves to `auto`.
 
+A `state` that carries media names a **reference**: `image_path` / `image_url` for a picture and
+`audio_path` / `audio_url` for a recording. Inline bytes are refused by argument validation
+(`image_base64`, `audio_base64`, or a `{"base64": ...}` mapping under `image`/`audio`), because a
+tool argument is a model-facing string, not a transport: the server that owns the file (or the URL
+policy) is the thing that reads it.
+
 `laya_route` accepts `explain: true` to add a top-level `diagnostic` with the core detector's
 `stage`, `reason`, and `source`. When no source exists, `source` is `null`. When the final routing
 decision has no diagnostic (for example, an explicit model or language override, or a hook
