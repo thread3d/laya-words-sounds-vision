@@ -14,6 +14,8 @@ for example `from laya import Router`.
   module rather than the top-level package, and the pieces they are built from.
 - [Vision](vision.md): `laya.vision` — how a state carrying an image is split, what the picture
   becomes inside the sequence, and how the block is laid out against the option markers.
+- [Sounds](audio.md): `laya.audio` — how a recording is measured and decoded, what the frozen
+  tower turns it into, and how the block is laid out against the option markers.
 - [LangChain components](langchain.md): `LayaRouter`, `LayaGuardrail`, `LayaTriage` and
   `LayaEvaluator`.
 

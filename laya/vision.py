@@ -44,10 +44,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .block import BlockPlan, describe_plan as _describe_block_plan, plan_block, reserved_positions
+from .block import splice_embeddings, SLOTS
+from .projector import PooledProjector, tower_width as _shared_tower_width
+from .projector import truncate_tower as _truncate_tower_shared
+
 # Slots the builder understands. `after_options` is the only one implemented; the others are named
 # so a config naming them fails loudly at load with a list of what exists, rather than silently
-# falling back to the default and moving the block somewhere the author did not ask for.
-SLOTS = ("after_options",)
+# falling back to the default and moving the block somewhere the author did not ask for. The list
+# lives in `laya.block`, which is where the layout itself is shared with the audio path.
 # How the projected patch tokens are compressed before they enter the text sequence.
 POOLINGS = ("adaptive_avg", "none")
 
@@ -129,6 +134,8 @@ class VisionConfig:
         """The positions the visual block occupies, for the `reserved` policy.
 
         `start` is the block's first position; `None` reserves the top of the positional budget.
+        The arithmetic is `laya.block`, shared with the audio path, so the two modalities cannot
+        disagree about what "reserved" means.
 
         **This policy loses to `contiguous` on this encoder, and the measurement is the reason the
         default is what it is.** The block is *sequence*-adjacent to the option markers, but a
@@ -137,14 +144,8 @@ class VisionConfig:
         on. A frozen-feature probe on a trained checkpoint put the colour signal at 0.708 on the
         marker states with this policy; the same probe is the check for whatever replaces it.
         """
-        start = self.position_offset
-        if start is None:
-            start = max(0, max_position_embeddings - self.n_visual_tokens)
-        if max_position_embeddings and start + self.n_visual_tokens > max_position_embeddings:
-            raise ValueError(
-                "vision: position_offset=%r plus %d visual tokens exceeds this encoder's %d "
-                "positions" % (self.position_offset, self.n_visual_tokens, max_position_embeddings))
-        return list(range(start, start + self.n_visual_tokens))
+        return reserved_positions(self.n_visual_tokens, max_position_embeddings,
+                                  self.position_offset)
 
     def summary_wanted(self, option_tokens: int) -> bool:
         """Whether a high-cardinality head needs the summary token beside its markers."""
@@ -177,23 +178,29 @@ def parse_vision(cfg: Optional[Dict[str, Any]],
                         max_position_embeddings=max_position_embeddings)
 
 
-class VisualPlan:
+class VisualPlan(BlockPlan):
     """Where the visual block sits in one built sequence and what it costs.
 
     Produced by :func:`visual_plan`; consumed by :func:`assemble_inputs_embeds` at inference and by
     the training loop, so both agree about the splice point and the marker shifts.
+
+    It is a :class:`laya.block.BlockPlan` with the vision path's own name for the block's width.
+    `n_visual` is a property, not a second counter: the audio path spells the same number
+    `n_audio`, and neither may drift from `n_block`.
     """
 
-    __slots__ = ("splice", "n_visual", "summary", "marker_positions", "position_ids", "length")
+    __slots__ = ()
 
     def __init__(self, splice: int, n_visual: int, summary: bool, marker_positions: Sequence[int],
                  position_ids: Sequence[int], length: int):
-        self.splice = splice
-        self.n_visual = n_visual
-        self.summary = summary
-        self.marker_positions = list(marker_positions)
-        self.position_ids = list(position_ids)
-        self.length = length
+        super().__init__(splice=splice, n_block=n_visual, summary=summary,
+                         marker_positions=marker_positions, position_ids=position_ids,
+                         length=length)
+
+    @property
+    def n_visual(self) -> int:
+        """The block's width: `n_visual_tokens`, plus the summary row when one was asked for."""
+        return self.n_block
 
     def __repr__(self) -> str:
         return ("VisualPlan(splice=%d, n_visual=%d, summary=%s, length=%d)"
@@ -212,43 +219,20 @@ def visual_plan(vision: VisionConfig, text_len: int, markers: Sequence[int], hea
     compensated for an insertion in front of the options that never happens, and it moved every
     marker off its `[MASK]` token (measured on the real tokenizer: 100 options, 0/100 markers on
     a `[MASK]` with the shift, 100/100 without).
-    """
-    if vision.slot != "after_options":                      # pragma: no cover - guarded at load
-        raise ValueError("unsupported vision slot %r" % (vision.slot,))
-    if not 0 <= head_len <= text_len:
-        raise ValueError("head_len=%d must be within the sequence (0..%d)" % (head_len, text_len))
 
+    The layout arithmetic is :func:`laya.block.plan_block`, shared with the audio path.
+    """
     summary = vision.summary_wanted(
         option_tokens if option_tokens is not None else text_len - head_len)
     n_visual = vision.n_visual_tokens + (1 if summary else 0)
-    length = text_len + n_visual
-    if max_len is not None and length > max_len:
-        raise ValueError(
-            "vision: %d text tokens + %d visual tokens = %d, past max_len=%d. Lower "
-            "vision.n_visual_tokens, shorten the state, or raise max_len for this checkpoint."
-            % (text_len, n_visual, length, max_len))
-
-    splice = head_len
-    marker_positions = list(markers)
-
-    if vision.position_policy == "contiguous":
-        # The block continues the numbering where the head left off, and the text after it shifts
-        # by the block's width. RoPE encodes *distance*, so this is what actually makes the block
-        # adjacent to the option markers: the offsets are small, the 128-token local windows reach
-        # it, and every relative distance stays inside the range the checkpoint was trained on.
-        visual_positions = list(range(head_len, head_len + n_visual))
-        after = [p + n_visual for p in range(head_len, text_len)]
-        position_ids = list(range(head_len)) + visual_positions + after
-    else:
-        text_positions = list(range(text_len))
-        visual_positions = vision.position_ids_for_visual(
-            max_position_embeddings, start=splice if vision.position_offset is None else None)
-        if summary:
-            visual_positions = visual_positions + [visual_positions[-1] + 1]
-        position_ids = text_positions[:head_len] + visual_positions + text_positions[head_len:]
-    return VisualPlan(splice=splice, n_visual=n_visual, summary=summary,
-                      marker_positions=marker_positions, position_ids=position_ids,
-                      length=length)
+    plan = plan_block("vision", "visual", vision.slot, n_visual, text_len, markers, head_len,
+                      max_len, summary=summary,
+                      max_position_embeddings=max_position_embeddings,
+                      position_policy=vision.position_policy,
+                      position_offset=vision.position_offset)
+    return VisualPlan(splice=plan.splice, n_visual=plan.n_block, summary=plan.summary,
+                      marker_positions=plan.marker_positions, position_ids=plan.position_ids,
+                      length=plan.length)
 
 
 def assemble_inputs_embeds(tok_embeds, visual_embeds, plan: VisualPlan):
@@ -258,35 +242,16 @@ def assemble_inputs_embeds(tok_embeds, visual_embeds, plan: VisualPlan):
     their position ids moved, which :func:`visual_plan` already decided. No tensor arithmetic
     happens across the boundary -- this is a concatenation, so a gradient reaches the visual block
     exactly as it reaches the token embeddings.
+
+    The operation itself is :func:`laya.block.splice_embeddings`; this wrapper only supplies the
+    vision path's word for what is being spliced, which is what its errors have always said.
     """
-    if tok_embeds.dim() != 3 or visual_embeds.dim() != 3:
-        raise ValueError("expected [B, L, D] for both inputs, got %s and %s"
-                         % (tuple(tok_embeds.shape), tuple(visual_embeds.shape)))
-    if tok_embeds.size(0) != visual_embeds.size(0):
-        raise ValueError("batch mismatch: %d text rows against %d visual rows"
-                         % (tok_embeds.size(0), visual_embeds.size(0)))
-    if tok_embeds.size(-1) != visual_embeds.size(-1):
-        raise ValueError("width mismatch: text %d against visual %d; the projector must emit the "
-                         "encoder's hidden size" % (tok_embeds.size(-1), visual_embeds.size(-1)))
-    if visual_embeds.size(1) != plan.n_visual:
-        raise ValueError("plan expects %d visual tokens, got %d"
-                         % (plan.n_visual, visual_embeds.size(1)))
-    if plan.splice + 0 > tok_embeds.size(1):
-        raise ValueError("splice point %d is past the sequence (%d tokens)"
-                         % (plan.splice, tok_embeds.size(1)))
-    return _cat(tok_embeds, visual_embeds, plan.splice)
-
-
-def _cat(tok_embeds, visual_embeds, splice: int):
-    import torch
-    return torch.cat([tok_embeds[:, :splice], visual_embeds, tok_embeds[:, splice:]], dim=1)
+    return splice_embeddings(tok_embeds, visual_embeds, plan, label="visual")
 
 
 def describe_plan(plan: VisualPlan) -> Tuple[str, ...]:
     """Human-readable facts about a plan, for error messages and `--dry-run` style output."""
-    return ("splice at token %d" % plan.splice,
-            "%d visual tokens%s" % (plan.n_visual, " (with summary)" if plan.summary else ""),
-            "sequence length %d" % plan.length)
+    return _describe_block_plan(plan, noun="visual")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -302,72 +267,6 @@ def _torch():
     """
     import torch
     return torch
-
-
-class PooledProjector:
-    """Compress the tower's patch tokens and project them into the encoder's width.
-
-    Two operations, in this order:
-
-    * **pool** -- ``adaptive_avg`` folds the patch grid down to ``n_visual_tokens`` positions
-      (the documented baseline; a learned coarse-to-fine connector replaces this later behind the
-      same interface). ``none`` passes the patches through untouched.
-    * **project** -- a linear map into the text encoder's hidden size, plus a learned visual
-      *type* vector.
-
-    The type vector lives here rather than on ``DecisionModel`` on purpose. A new parameter on the
-    decision model would break `load_state_dict(..., strict=True)` for every existing checkpoint;
-    putting it in the projector keeps text checkpoints byte-identical and puts the "this is a
-    patch, not a word" signal exactly where the patches are produced. It is added *after* the
-    linear so it cannot be confused with a bias on a constant row.
-    """
-
-    def __init__(self, tower_dim: int, hidden_size: int, n_visual_tokens: int,
-                 pooling: str = "adaptive_avg", dtype=None):
-        torch = _torch()
-        self.n_visual_tokens = n_visual_tokens
-        self.pooling = pooling
-        self.proj = torch.nn.Linear(tower_dim, hidden_size)
-        self.type_vector = torch.nn.Parameter(torch.zeros(hidden_size))
-        if dtype is not None:
-            self.proj = self.proj.to(dtype)
-            self.type_vector.data = self.type_vector.data.to(dtype)
-
-    def parameters(self):
-        return [self.proj.weight, self.proj.bias, self.type_vector]
-
-    def to(self, device):
-        self.proj = self.proj.to(device)
-        self.type_vector.data = self.type_vector.data.to(device)
-        return self
-
-    def __call__(self, patches, summary: bool = False):
-        return self.forward(patches, summary=summary)
-
-    def forward(self, patches, summary: bool = False):
-        """`patches` ``[B, N, C]`` -> ``[B, n_visual_tokens (+1), hidden]``.
-
-        `summary=True` appends the ``[VIS_SUMMARY]`` row (spec §4.1): the *globally* pooled patch
-        vector, projected through the same map and type vector as the rows above it. It is the one
-        token in the block that sees every patch, which is what a high-cardinality head needs --
-        above ~30 options the last markers sit past the encoder's 128-token local window and can
-        only reach the picture through a token that already pooled it.
-
-        The same type vector on purpose: it *is* a visual token, and reusing it keeps the projector
-        parameter set -- and therefore every saved `vision.safetensors` -- unchanged.
-        """
-        torch = _torch()
-        x = patches
-        if self.pooling == "adaptive_avg":
-            x = torch.nn.functional.adaptive_avg_pool1d(x.transpose(1, 2), self.n_visual_tokens)
-            x = x.transpose(1, 2)
-        elif self.pooling != "none":
-            raise ValueError("unknown pooling %r" % (self.pooling,))
-        out = self.proj(x) + self.type_vector
-        if summary:
-            pooled = self.proj(patches.mean(dim=1, keepdim=True)) + self.type_vector
-            out = torch.cat([out, pooled], dim=1)
-        return out
 
 
 class VisionEncoder:
@@ -490,18 +389,12 @@ def load_tower(model_id: str, revision: Optional[str] = None, keep_layers: Optio
 
 
 def _truncate_tower(tower, keep_layers: int):
-    """Keep only the first `keep_layers` blocks of the tower's encoder."""
-    vision_model = getattr(tower, "vision_model", tower)
-    enc = getattr(vision_model, "encoder", None)
-    layers = getattr(enc, "layers", None)
-    if layers is None:
-        raise TypeError("keep_layers=%d was requested but this tower has no `.encoder.layers` to "
-                        "truncate" % keep_layers)
-    if not 1 <= keep_layers <= len(layers):
-        raise ValueError("keep_layers=%d is out of range for a %d-block tower"
-                         % (keep_layers, len(layers)))
-    enc.layers = layers[:keep_layers]
-    return tower
+    """Keep only the first `keep_layers` blocks of the tower's encoder.
+
+    Shared with the audio path (`laya.projector.truncate_tower`), which is the same stack of blocks
+    under a different wrapper.
+    """
+    return _truncate_tower_shared(tower, keep_layers)
 
 
 TOWER_DIR = "vision_tower"
@@ -544,16 +437,8 @@ def build_vision_encoder(config: VisionConfig, hidden_size: int, tower=None, dty
 
 
 def _tower_width(tower) -> int:
-    cfg = getattr(tower, "config", None)
-    for attr in ("hidden_size", "projection_dim"):
-        val = getattr(cfg, attr, None)
-        if isinstance(val, int):
-            return val
-    vision_cfg = getattr(cfg, "vision_config", None)
-    val = getattr(vision_cfg, "hidden_size", None)
-    if isinstance(val, int):
-        return val
-    raise TypeError("cannot determine the tower's patch width from %s" % type(cfg).__name__)
+    """The width a tower emits, read from its config (shared with the audio path)."""
+    return _shared_tower_width(tower)
 
 
 def tower_parameters(encoder: VisionEncoder):
