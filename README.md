@@ -164,8 +164,9 @@ the full entry.
 * **The audio numbers are public and gated.** ESC-50 and FSDD through the shipped path: a frozen
   linear probe at **52.65 %** on 50-way ESC-50, and the engine at **75.5 %** on 10-way FSDD with
   gate 1 **+0.655** (the recording removed drops it to chance) and 69 ms per decision on a CPU. Gate
-  2b fails at 27.4 % on the joint layout — the same finding the vision program made — and
-  `state_conditioned` is the documented fix. See
+  2b fails at 27.4 % on the joint layout — the same finding the vision program made — and the
+  shipping `state_conditioned` layout passes both gates on a learning control (gate 1 +0.906,
+  0.0 % flips). See
   [the results](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-benchmark-results.md).
 * **The design is written down.** [The sound decision system](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-decision-system.md)
   holds the contract, the layout, the tower knobs, the training data contract, the limits by layer,

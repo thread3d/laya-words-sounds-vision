@@ -157,6 +157,14 @@ FSDD gives 2 000 training recordings rather than 288, and the same recipe as the
 | 3 epochs, `--grad-accum 1 --head-lr 1e-3` | 0.1490 | 750 |
 | **15 epochs, `--grad-accum 1`, default `head_lr`** | **0.7550** | 3 750 |
 
+A `state_conditioned` arm on the same public data was attempted and **cost too much for a CPU**:
+601 items × 10 rows = 6 010 rows per epoch, and measured **~11 minutes per epoch** — about 2.2 hours
+for the 12-epoch run the recipe wants. The reason is worth knowing rather than treating as bad luck:
+with the encoder frozen, a *text* step skips the backward pass, but a media step cannot — the
+projector sits upstream of the encoder, so its gradient has to traverse all 28 frozen layers. A
+profile without the encoder attached measured 2.4 minutes per epoch; in the real run it is 11. That
+is the price of the projector, and it is why every media arm here is quoted with its wall clock.
+
 So the head is slow, not unable: 3 750 updates take it from chance to **75.5 %**, within 4 points of the
 linear probe on the same frozen features. That is the engine's first real public number.
 
@@ -177,6 +185,25 @@ held-out recordings:
 | accuracy with the recording removed | **0.1000** (chance) | — |
 | **gate 1 — sound necessity** | **+0.655** | **passes** |
 | **gate 2b — option-order invariance** | **27.4 % of answers flip** | **fails** |
+
+### The layout the product ships, measured on a learning model
+
+Gate 2b above fails because the arm uses the **joint** layout. The layout that ships is
+`state_conditioned`, and its order invariance was measured on a control that learns, cheaply:
+`synth.py --classes 20 --layout state_conditioned` — 20 options, tones, 58 training rows, 8 epochs
+(64 optimizer updates).
+
+| 20-option control, `state_conditioned` | measured | verdict |
+|---|---|---|
+| accuracy | **1.0000** (from 0.0000) | — |
+| accuracy with the recording removed | 0.0938 | — |
+| **gate 1 — sound necessity** | **+0.906** | **passes** |
+| **gate 2b — option-order invariance** | **0.0 % of answers flip** | **passes** |
+| median decision latency | 498 ms | 20 rows per decision |
+
+So the same path, with the layout the product ships, passes both gates — on a model that is
+demonstrably learning. The joint layout's 27.4 % on real data and this 0.0 % are the two halves of
+the option-order story, and they agree with the vision program's 28.3 % / 0.0 % on CIFAR-20.
 
 Gate 1 is the headline the shipped checkpoint could not produce before: remove the audio and the
 model falls from 75.5 % to chance, so the answer is about the recording and not about the text around

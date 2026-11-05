@@ -124,6 +124,11 @@ the caller can act on. See [the evaluation harness](evals.md#media-gates-does-it
 
 ## 8. What is measured, and what is not
 
+**Measured on public data** (FSDD, 1 000 speaker-disjoint held-out clips): the joint layout reaches
+0.7550 with gate 1 **+0.655** and gate 2b **27.4 %** (fails); the shipping `state_conditioned` layout
+passes both gates on a learning control (gate 1 **+0.906**, gate 2b **0.0 %**). The full tables, the
+controls and the wall clocks are in [the results page](audio-benchmark-results.md).
+
 **Measured** (and re-runnable here): the layout arithmetic is shared with the vision path and
 identical by construction (`tests/test_audio.py` asserts the two plans agree number for number); an
 audio block changes the option logits end to end on a tiny model; a training step moves the head and

@@ -6,6 +6,27 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.5] - 2026-11-05
+
+Both gates, on a model that is learning — and the price of the second one on this hardware.
+
+### Added
+
+- `synth.py --layout state_conditioned`: the 20-option control trained in the layout the product
+  ships. Measured: accuracy **1.0000**, gate 1 **+0.906**, **gate 2b 0.0 %**, 498 ms per decision.
+  The joint layout's 27.4 % on FSDD and this 0.0 % are the two halves of the option-order story,
+  and they match the vision program's 28.3 % / 0.0 % on CIFAR-20.
+- `--checkpoint-every` on the synthetic control too, so a fast control is not paying for recovery
+  checkpoints it does not need.
+
+### Measured
+
+- A `state_conditioned` arm on public data costs **~11 minutes per epoch** at 601 items (6 010 rows)
+  on a CPU — 2.2 hours for the 12-epoch recipe. The cause is structural and now documented: with the
+  encoder frozen a *text* step skips the backward pass, but a media step cannot, because the
+  projector sits upstream of the encoder and its gradient traverses all 28 frozen layers. Without
+  the encoder attached the same profile measures 2.4 minutes per epoch.
+
 ## [2.1.4] - 2026-11-05
 
 The largest cost of a media run is not the model.

@@ -83,6 +83,10 @@ def main(argv=None) -> int:
     parser.add_argument("--base", default=os.path.join(REPO, "models", "laya"))
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--classes", type=int, default=2, choices=[2, 20, 50, 100])
+    parser.add_argument("--layout", default="sequential",
+                        choices=["sequential", "state_conditioned"],
+                        help="the option layout to train; `state_conditioned` is the one whose "
+                             "order invariance this control measures")
     args = parser.parse_args(argv)
     build(classes=args.classes)
     if not args.run:
@@ -93,13 +97,14 @@ def main(argv=None) -> int:
         "--base", args.base,
         "--out", os.path.join(DATA_ROOT, "checkpoints", "synth"),
         "--audio", '{"n_audio_tokens": 32}',
-        "--option-layout", "sequential", "--freeze-encoder",
+        "--option-layout", args.layout, "--freeze-encoder",
         "--epochs", str(args.epochs), "--grad-accum", "1",
         # The two-class task needs a bigger step; the 100-option one diverges at 1e-3, so the
         # default rate is kept there (see the results page's learning-rate note).
         "--head-lr", "1e-3" if args.classes == 2 else "1e-4",
         "--micro-batch", "8", "--device", "cpu",
         "--max-len", "512", "--head-max-len", "400" if args.classes > 20 else "192",
+        "--checkpoint-every", "0",
         "--eval", os.path.join(OUT, "eval.jsonl"),
     ])
 
