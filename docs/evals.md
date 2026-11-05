@@ -630,7 +630,7 @@ compare the two passes; both are the gates in `docs/vision-decision-system.md` Â
 
 ```
 laya-evals ablate vision.jsonl --min-gain 0.35 --json report.json
-laya-evals ablate sounds.jsonl --modality audio --min-gain 0.35 --json report.json
+laya-evals ablate sounds.jsonl --modality audio --min-gain 0.35 --batch-size 8 --json report.json
 ```
 
 `--modality` is `image` (the default, and the original form of this gate) or `audio`. Both are the
@@ -643,11 +643,17 @@ The report gives accuracy on both sides per tag slice and the drop between them.
 makes it a verdict â€” the run exits non-zero unless accuracy falls by at least `X` when the pixels
 are taken away.
 
-Both passes go through one `predict_batch`, image states and text-only states in the same batch.
-That is what `Agent.predict_batch` is for, and it is why the ablation is cheap: a mixed batch is
-one forward pass per pair rather than a tower pass per row. (Before v0.4.48 the mixed batch raised
-`KeyError: 'visual'`, so every gate number in the vision write-up had to be measured one state per
-forward pass.)
+By default each row is answered on its own, one state per forward pass, which keeps a gate number
+comparable to published one-state-at-a-time results. `--batch-size N` re-answers with N rows per
+forward pass instead: rows are grouped by their question set (a batch carries one schema for all its
+states), so a dataset whose rows share a question -- ESC-50, CIFAR-20 -- becomes one call per chunk.
+Measured on a CPU with a 50-option audio question, that is ~4 s per decision singly against ~0.5 s
+per row batched, which is the difference between an hour and seven minutes for a 400-row gate. The
+two modes produce the same arithmetic; `tests/test_evals_audio.py` holds them equal.
+
+`Agent.predict_batch` accepting a batch that mixes media states with text-only ones is what makes
+the batched form possible at all. (Before v0.4.48 the mixed batch raised `KeyError: 'visual'`, so
+every gate number in the vision write-up had to be measured one state per forward pass.)
 
 A model that barely notices is the documented default failure of multimodal fusion: the encoder
 learns to answer from the text and the image becomes decoration. Accuracy alone cannot see that,

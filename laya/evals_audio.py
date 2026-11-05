@@ -12,9 +12,9 @@ numbers rather than two implementations that happen to agree today.
 
 Neither the ablation nor the option-order gate needs an audio checkpoint to exist to be useful: run
 against a text runner, the ablation reports a gain of zero, which is the correct answer for a text
-model. Both call `runner.predict(state, questions)` one row at a time, deliberately: batching would
-make the two passes differ in padding and numerics, and a gate whose two halves are not directly
-comparable is not a gate.
+model. Both answer every row on its own by default, so a gate number stays comparable to published
+one-state-at-a-time results; `batch_size` re-answers with several rows per pass (grouped by question
+set), and both passes are always batched the same way, so the comparison holds.
 """
 from typing import Any, Dict, Optional
 
@@ -45,7 +45,8 @@ def strip_audio(state: Any) -> Any:
 
 
 def audio_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None,
-                   min_text_change: float = 0.01) -> Dict[str, Any]:
+                   min_text_change: float = 0.01,
+                   batch_size: int = 1) -> Dict[str, Any]:
     """How much of the accuracy depends on the recording actually being there.
 
     Runs every row twice -- as given, and with the sound stripped -- and reports accuracy on both
@@ -61,4 +62,5 @@ def audio_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None
     pass itself is non-deterministic, and every other number in the report is then noise.
     """
     return ablation(runner, dataset, gate="audio-necessity", noun="audio", keys=AUDIO_KEYS,
-                    min_gain=min_gain, min_text_change=min_text_change)
+                    min_gain=min_gain, min_text_change=min_text_change,
+                    batch_size=batch_size)

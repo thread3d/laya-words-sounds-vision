@@ -121,6 +121,10 @@ class TrainConfig:
     # it is, and a mapping adds the block. A checkpoint may declare both blocks; a *state* carries
     # one input or the other, never both.
     audio: Optional[Dict[str, Any]] = None
+    # Threads used to encode the media inputs while the dataset is built (0 = auto, 1 = serial).
+    # A vision or audio run spends most of its build time in a frozen tower, and one tower pass per
+    # input is embarrassingly parallel; this is the knob, and the result is identical either way.
+    encode_workers: int = 0
     option_layout: Optional[str] = None
     freeze_encoder: bool = False
     calib_max: int = 400
@@ -177,6 +181,10 @@ class TrainConfig:
                     "modality_dropout=%r would train most items without the input the decision "
                     "is about, which is how a multimodal checkpoint becomes a text one"
                     % (self.modality_dropout,))
+        if isinstance(self.encode_workers, bool) or not isinstance(self.encode_workers, int) \
+                or self.encode_workers < 0:
+            raise ValueError("encode_workers must be a non-negative integer (0 = auto), got %r"
+                             % (self.encode_workers,))
         if self.loss is not None and self.loss not in LOSSES:
             raise ValueError("loss must be one of %s (or None for the checkpoint default), got %r"
                              % (", ".join(LOSSES), self.loss))
@@ -372,11 +380,57 @@ def make_item(tok, q: Dict[str, Any], target: Sequence[float], state_ids: List[i
             "option_tokens": (len(_ids) - markers[0]) if markers else 0}, None
 
 
+def encode_media(specs, encode, keys, workers: int = 0):
+    """Run a media encoder over the distinct inputs of a dataset, in parallel when asked.
+
+    `specs` is a list of already-decoded inputs (pixels, waveforms), `encode` the tower callable,
+    and `keys` their content keys. Returns ``{key: block}`` -- one block per *distinct* input, which
+    is what makes a dataset build cost one tower pass per recording rather than one per question.
+
+    The tower is the expensive half of building a media dataset and it is embarrassingly parallel:
+    each input is independent, the tower is frozen, and torch releases the GIL inside its kernels.
+    Serial encoding measured 9.2 clips/s on this 56-core machine and eight threads measured 18.9,
+    which is why the trainer does not do it one input at a time by default. The thread count is
+    split across the workers -- `torch.set_num_threads(cpu // workers)` -- because N workers each
+    asking for every core oversubscribes and measured *slower* than serial.
+
+    `workers=0` picks ``min(8, cpu_count)``; `workers=1` keeps the old serial path, which is what a
+    caller with its own single-threaded encoder wants.
+    """
+    unique: Dict[str, Any] = {}
+    for spec, key in zip(specs, keys):
+        unique.setdefault(key, spec)
+    if not unique:
+        return {}
+    if workers == 1 or len(unique) == 1:
+        return {key: encode(spec) for key, spec in unique.items()}
+
+    import torch
+    from concurrent.futures import ThreadPoolExecutor
+
+    workers = _resolve_encode_workers(workers)
+    previous = torch.get_num_threads()
+    torch.set_num_threads(max(1, previous // workers))
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            blocks = list(pool.map(encode, unique.values()))
+    finally:
+        torch.set_num_threads(previous)
+    return dict(zip(unique.keys(), blocks))
+
+
+def _resolve_encode_workers(workers: int) -> int:
+    if workers and workers > 0:
+        return int(workers)
+    return max(1, min(8, os.cpu_count() or 1))
+
+
 def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                     head_max_len: int,
                     label_smoothing: float = 0.0,
                     vision=None, encode_visual=None,
-                    audio=None, encode_audio=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+                    audio=None, encode_audio=None,
+                    encode_workers: int = 0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Items from `{state, questions, gold}` or `{state, questions, expected}` rows; returns `(items, skipped)`.
 
     With `vision` set and `encode_visual` supplied (a callable pixels -> `[n_visual, hidden]`),
@@ -385,6 +439,10 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
     the block is attached to every item built from that row -- so one image asked five questions
     costs one tower pass, not five.
 
+    `encode_workers` sets how many threads encode the media inputs (0 = auto, 1 = serial); see
+    :func:`encode_media`. The result is identical either way -- the same blocks, in the same order --
+    so this is a speed knob, not a behaviour one.
+
     `skipped` counts, by reason, questions that were labelled but could not become an item:
     `empty_text`, `empty_label`, `invalid_question` and `invalid_target` (a `ValueError` from
     `to_internal`, `target_from_gold` or `target_from_expected`), plus the reasons `make_item`
@@ -392,45 +450,64 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
     simply does not label them.
     """
     items, skipped = [], {}
-    cache = VisualCache() if (vision is not None and encode_visual is not None) else None
-    audio_cache = AudioCache() if (audio is not None and encode_audio is not None) else None
+    rows = list(rows)
+    # Phase 1: split every state and decode every media input, so the tower passes can run together
+    # (phase 2) instead of one at a time in the middle of the row loop.
+    prepared = []
     for row in rows:
         state = row.get("state")
+        visual_spec = audio_spec = None
+        if vision is not None and encode_visual is not None and state is not None:
+            state, image = split_state(state)
+            if image is not None:
+                visual_spec = load_pixels(image, vision.image_size)
+                visual_spec = (visual_spec, VisualCache.key(visual_spec))
+        if audio is not None and encode_audio is not None and state is not None:
+            state, sound = split_audio_state(state)
+            if sound is not None:
+                waveform = load_waveform(sound, audio.sample_rate)
+                audio_spec = (waveform, AudioCache.key(waveform))
+        prepared.append({"row": row, "state": state, "visual": visual_spec, "audio": audio_spec})
+
+    blocks: Dict[str, Any] = {}
+    if vision is not None and encode_visual is not None:
+        specs = [p["visual"][0] for p in prepared if p["visual"] is not None]
+        keys = [p["visual"][1] for p in prepared if p["visual"] is not None]
+        blocks.update(encode_media(specs, encode_visual, keys, workers=encode_workers))
+    if audio is not None and encode_audio is not None:
+        specs = [p["audio"][0] for p in prepared if p["audio"] is not None]
+        keys = [p["audio"][1] for p in prepared if p["audio"] is not None]
+        blocks.update(encode_media(specs, encode_audio, keys, workers=encode_workers))
+
+    # Phase 2: the rows themselves, on already-encoded blocks.
+    for item_row in prepared:
+        row = item_row["row"]
+        state = item_row["state"]
         visual = None
         visual_key = None
         audio_frames = None
         audio_key = None
         text_budget = max_len
-        if vision is not None and encode_visual is not None and state is not None:
-            state, image_spec = split_state(state)
-            if image_spec is not None:
-                pixels = load_pixels(image_spec, vision.image_size)
-                visual = cache.get_or_encode(pixels, encode_visual)
-                # The image's identity, for callers that need to tell two rows apart. `state_ids`
-                # cannot: a vision state is split, so every image row carries the same few text
-                # tokens ("a photograph") and looks identical to every other.
-                visual_key = VisualCache.key(pixels)
-                text_budget = max_len - vision.n_visual_tokens
-                if text_budget < 16:
-                    skipped["image_too_large"] = skipped.get("image_too_large", 0) + 1
-                    continue
-        if audio is not None and encode_audio is not None and state is not None:
-            state, audio_spec = split_audio_state(state)
-            if audio_spec is not None:
-                if visual is not None:
-                    # One sequence carries one spliced block; a row that names both inputs is a
-                    # dataset bug, and training it as whichever half was parsed first would report
-                    # a number for a task the run never measured.
-                    skipped["both_modalities"] = skipped.get("both_modalities", 0) + 1
-                    continue
-                waveform = load_waveform(audio_spec, audio.sample_rate)
-                audio_frames = audio_cache.get_or_encode(waveform, encode_audio)
-                # The recording's identity, for the same reason `visual_key` exists.
-                audio_key = AudioCache.key(waveform)
-                text_budget = max_len - audio.n_audio_tokens
-                if text_budget < 16:
-                    skipped["audio_too_large"] = skipped.get("audio_too_large", 0) + 1
-                    continue
+        if item_row["visual"] is not None:
+            visual_key = item_row["visual"][1]
+            visual = blocks[visual_key]
+            text_budget = max_len - vision.n_visual_tokens
+            if text_budget < 16:
+                skipped["image_too_large"] = skipped.get("image_too_large", 0) + 1
+                continue
+        if item_row["audio"] is not None:
+            if visual is not None:
+                # One sequence carries one spliced block; a row that names both inputs is a
+                # dataset bug, and training it as whichever half was parsed first would report a
+                # number for a task the run never measured.
+                skipped["both_modalities"] = skipped.get("both_modalities", 0) + 1
+                continue
+            audio_key = item_row["audio"][1]
+            audio_frames = blocks[audio_key]
+            text_budget = max_len - audio.n_audio_tokens
+            if text_budget < 16:
+                skipped["audio_too_large"] = skipped.get("audio_too_large", 0) + 1
+                continue
         if state is None or (isinstance(state, str) and not state.strip()):
             # An input on its own is a legal state (spec §6.5): it is the evidence.
             if visual is None and audio_frames is None:
@@ -529,7 +606,8 @@ def attach_audio_projector(encoder, model_dir: str, base_declares_audio: bool) -
 
 def eval_items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int, head_max_len: int,
                          vision=None, encode_visual=None, audio=None,
-                         encode_audio=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+                         encode_audio=None,
+                         encode_workers: int = 0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """The `--eval` rows, built through the *same* modality path the training rows used.
 
     An eval set exists to answer "how good is this checkpoint", and for a vision checkpoint the
@@ -544,7 +622,8 @@ def eval_items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int, head
     """
     return items_from_rows(tok, rows, max_len, head_max_len, label_smoothing=0.0,
                            vision=vision, encode_visual=encode_visual,
-                           audio=audio, encode_audio=encode_audio)
+                           audio=audio, encode_audio=encode_audio,
+                           encode_workers=encode_workers)
 
 
 def rows_from_csv(path: str, text_column: str = "text", label_column: str = "label",
@@ -1611,7 +1690,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     items, skipped = items_from_rows(tok, rows, max_len, head_max_len,
                                      label_smoothing=config.label_smoothing,
                                      vision=vision, encode_visual=encode_visual,
-                                     audio=audio, encode_audio=encode_audio)
+                                     audio=audio, encode_audio=encode_audio,
+                                     encode_workers=config.encode_workers)
     if not items:
         raise ValueError("%s produced no training items (skipped: %r)" % (data, skipped))
     train_items, calib_items = split_calibration(items, config.calib_max, config.calib_frac, config.calib_seed)
@@ -1629,7 +1709,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
                               question_id=config.question_id, instructions=config.instructions)
         eval_items, eval_skipped = eval_items_from_rows(tok, eval_rows, max_len, head_max_len,
                                                      vision=vision, encode_visual=encode_visual,
-                                                     audio=audio, encode_audio=encode_audio)
+                                                     audio=audio, encode_audio=encode_audio,
+                                                     encode_workers=config.encode_workers)
 
         if not eval_items:
             eval_mode = None
@@ -1643,11 +1724,13 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
             # (state token ids, normalized question schema).
             # Checked separately from targets to detect shared inputs even when labels differ (#967).
             def input_sig(it):
-                # A vision row's text is not its input: the image is. Every CIFAR row shares the
-                # state text "a photograph", so a text-only signature calls two different pictures
+                # A media row's text is not its input: the picture or the recording is. Every CIFAR
+                # row shares the state text "a photograph" and every ESC-50 row shares "a recording
+                # of an environmental sound", so a text-only signature calls two different inputs
                 # the same row and reports a held-out eval set as overlapping its training data.
+                # The content keys are what make the signature the input rather than the wrapper.
                 return (tuple(it["state_ids"]), json.dumps(it["q"], sort_keys=True),
-                        it.get("visual_key"))
+                        it.get("visual_key"), it.get("audio_key"))
 
             train_input_sigs = {input_sig(it) for it in train_items}
             calib_input_sigs = {input_sig(it) for it in calib_items}

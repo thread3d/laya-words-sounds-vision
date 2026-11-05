@@ -10,6 +10,7 @@ comparable.
 The option-order gate is fully modality-agnostic (it permutes a question, not a state) and stays in
 `laya.evals_vision` where it was first written, next to the report format its tests pin.
 """
+import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from .evals import Dataset, EvalError, Example, _correct
@@ -48,6 +49,43 @@ def ask(runner, state: Any, questions: Dict[str, Any], model: Optional[str]) -> 
     return answers
 
 
+def ask_many(runner, examples: Sequence[Example], *, batch_size: int = 1) -> List[Dict[str, Any]]:
+    """Answers for many examples, in input order, batched where the runner allows it.
+
+    The gate's unit is one row answered twice, but a benchmark of a few hundred rows cannot afford
+    one forward pass per row on a CPU -- and a batch is what `Agent.predict_batch` is for. Examples
+    are grouped by their *question set* (a batch carries one question schema for all its states),
+    so a dataset whose rows share a question -- ESC-50, CIFAR-20 -- becomes one call per chunk, and
+    a dataset whose rows differ falls back to one call per group.
+
+    `batch_size=1` keeps the original single-row path, which is the default: a gate compared against
+    published one-state-at-a-time numbers should not silently change its batching. A runner with no
+    `predict_batch` is always asked one row at a time.
+    """
+    if batch_size <= 1 or not hasattr(runner, "predict_batch"):
+        return [ask(runner, ex.state, ex.questions, ex.model) for ex in examples]
+
+    groups: Dict[str, List[int]] = {}
+    for index, example in enumerate(examples):
+        groups.setdefault(json.dumps(example.questions, sort_keys=True, default=str), []).append(index)
+
+    answers: List[Any] = [None] * len(examples)
+    for key, indices in groups.items():
+        questions = examples[indices[0]].questions
+        for start in range(0, len(indices), batch_size):
+            chunk = indices[start:start + batch_size]
+            results = runner.predict_batch([examples[i].state for i in chunk], questions)
+            if len(results) != len(chunk):
+                raise EvalError("runner.predict_batch returned %d answers for %d states"
+                                % (len(results), len(chunk)))
+            for index, result in zip(chunk, results):
+                got = (result or {}).get("answers")
+                if not isinstance(got, dict):
+                    raise EvalError("runner.predict_batch returned no 'answers' object")
+                answers[index] = got
+    return answers
+
+
 def accuracy(examples: Sequence[Example], answers: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Fraction of questions answered, and the fraction of those answered correctly."""
     asked = correct = 0
@@ -76,7 +114,7 @@ def slices(examples: Sequence[Example]) -> Dict[str, List[int]]:
 
 def ablation(runner, dataset: Dataset, *, gate: str, noun: str, keys: Sequence[str],
              min_gain: Optional[float] = None,
-             min_text_change: float = 0.01) -> Dict[str, Any]:
+             min_text_change: float = 0.01, batch_size: int = 1) -> Dict[str, Any]:
     """How much of the accuracy depends on `keys` actually being there.
 
     `noun` is the word the report uses for the input ("image", "audio") and names the per-slice keys
@@ -107,8 +145,8 @@ def ablation(runner, dataset: Dataset, *, gate: str, noun: str, keys: Sequence[s
         else:
             without_input.append(example)
 
-    answers_with = [ask(runner, ex.state, ex.questions, ex.model) for ex in with_input]
-    answers_without = [ask(runner, ex.state, ex.questions, ex.model) for ex in stripped]
+    answers_with = ask_many(runner, with_input, batch_size=batch_size)
+    answers_without = ask_many(runner, stripped, batch_size=batch_size)
 
     per_tag: Dict[str, Any] = {}
     for tag, indices in slices(with_input).items():
@@ -122,11 +160,15 @@ def ablation(runner, dataset: Dataset, *, gate: str, noun: str, keys: Sequence[s
             if a["accuracy"] is not None and b["accuracy"] is not None else None,
         }
 
-    # The pass must be a no-op on rows that carry no input.
-    text_answers = [ask(runner, ex.state, ex.questions, ex.model) for ex in without_input]
+    # The pass must be a no-op on rows that carry no input. Both sides are asked the same way, so a
+    # batched run compares like with like.
+    text_answers = ask_many(runner, without_input, batch_size=batch_size)
+    text_stripped = [Example(state=strip_keys(ex.state, keys), questions=ex.questions,
+                             expected=ex.expected, tags=ex.tags, language=ex.language,
+                             model=ex.model) for ex in without_input]
+    text_second = ask_many(runner, text_stripped, batch_size=batch_size)
     text_moved = 0
-    for example, first in zip(without_input, text_answers):
-        second = ask(runner, strip_keys(example.state, keys), example.questions, example.model)
+    for first, second in zip(text_answers, text_second):
         if first != second:
             text_moved += 1
     text_change = (text_moved / len(without_input)) if without_input else 0.0

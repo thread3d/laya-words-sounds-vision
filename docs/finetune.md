@@ -170,6 +170,7 @@ warning the run prints before gating on `min_confidence`.
 | `--eval`, `--eval-data` | none | a second dataset, answered before and after the fine-tune. Without it the "after" numbers come from the calibration slice; the run's report says which of the two it is (`eval_mode`, `is_held_out`, `note`), and rows whose state and question also occur in the training or calibration inputs count as overlap and stop the metrics being held out (#967) |
 | `--target-error` | `0.10` | the error the run fits the checkpoint's per-bucket abstention thresholds to keep among the answers it accepts |
 | `--min-abstain-n` | `10` | a bucket with fewer items than this is left out of that map, and `resolve_min_confidence` gates that option count at 0.0 -- nothing abstains -- unless the caller sets `min_confidence` itself |
+| `--encode-workers` | `0` (auto: `min(8, cores)`) | threads that encode the pictures or recordings while the dataset is built. A vision or audio run spends most of its build time in a frozen tower, and one tower pass per input is embarrassingly parallel: 9.2 inputs/s serially against 18.9 with eight threads, measured here. `1` restores the serial path; the items are identical either way |
 | `--device`, `--seed` | `auto`, 0 | |
 
 Mixed precision is on for CUDA. On a GPU where fp16 runs slower than fp32 (the GTX 16xx cards, for

@@ -6,6 +6,44 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.0] - 2026-11-05
+
+The first public audio benchmark, and the three defects it found on the way. ESC-50 measured through
+the shipped path: frozen wav2vec2-base probe **0.5265 ± 0.0368** over five folds (chance 0.02), and
+the engine's own arms in `research/benchmarks/audio_esc50/`.
+
+### Added
+
+- **The ESC-50 benchmark harness** (`research/benchmarks/audio_esc50/`): `prep.py` builds Laya rows
+  for all five folds (50-way and the ESC-10 subset), `probe.py` measures the control ladder
+  (chance → centroid → ridge probe on cached frozen features), `train.sh` runs one engine arm
+  through `laya-train --audio`, `run_engine_arms.sh` runs both arms plus their gates, and
+  `eval_gate.py` reports accuracy, gate 1, gate 2b and per-decision latency.
+- **`--encode-workers`** on `laya-train` (and `TrainConfig.encode_workers`,
+  `laya.train.encode_media`): the media inputs of a dataset are encoded in threads instead of one at
+  a time. Measured on this 56-core machine: 9.2 clips/s serially against 18.9 with eight threads,
+  with the torch thread count split across the workers (N workers asking for every core measured
+  *slower* than serial). The items are identical either way.
+- **`--batch-size`** on `laya-evals ablate` and `flip`: the gate passes can re-answer several rows
+  per forward pass, grouped by question set. A 50-option audio question costs ~4 s per decision
+  singly against ~0.5 s batched, which is the difference between an hour and seven minutes for a
+  400-row gate. Both passes are batched identically, so the comparison holds.
+- `docs/audio-benchmark-assessment.md` (candidate datasets, the published-systems table with its
+  protocols, and what a Laya number can honestly be compared to) and
+  `docs/audio-benchmark-results.md` (the measured controls).
+
+### Fixed
+
+- **A held-out eval set of recordings was reported as overlapping its training data.** The input
+  signature the trainer uses to detect overlap included the picture's content hash but not the
+  recording's, and every ESC-50 row shares the state text "a recording of an environmental sound" —
+  so every eval row matched every training row, `eval_mode` became `overlapping_eval`, and the run
+  refused to call its own numbers held out. The signature now includes the recording.
+  `tests/test_train_audio.py` holds it with a same-text/different-waveform pair.
+- **`docs/evals.md` described a batching the gate did not do.** It claimed both ablation passes go
+  through one `predict_batch`; the implementation answered one row at a time. The batching now
+  exists (`--batch-size`) and the page describes both modes and their measurements.
+
 ## [2.0.0] - 2026-11-05
 
 Words, sounds or vision. A state may now carry a **recording** as well as text or a picture, and a

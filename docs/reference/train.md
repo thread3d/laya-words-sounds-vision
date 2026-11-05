@@ -40,6 +40,8 @@ re-exported from the top-level package. `laya-train` is its command line. The
 
 ::: laya.train.make_item
 
+::: laya.train.encode_media
+
 ::: laya.train.encode_item
 
 ::: laya.train.draw_option_order

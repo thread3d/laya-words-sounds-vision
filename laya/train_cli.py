@@ -185,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
              "checkpoint may carry both --vision and --audio; a state carries one or the other.",
     )
     parser.add_argument(
+        "--encode-workers",
+        dest="encode_workers",
+        type=int,
+        default=0,
+        help="Threads that encode the pictures or recordings while the dataset is built. 0 (the "
+             "default) picks min(8, cores); 1 encodes serially. Same result either way -- a "
+             "vision or audio run spends most of its build time in a frozen tower, and this is "
+             "the only knob on it.",
+    )
+    parser.add_argument(
         "--option-layout",
         dest="option_layout",
         choices=("sequential", "parallel", "state_conditioned"),
@@ -268,6 +278,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         min_abstain_n=args.min_abstain_n,
         vision=vision,
         audio=audio,
+        encode_workers=args.encode_workers,
         option_layout=args.option_layout,
     )
 

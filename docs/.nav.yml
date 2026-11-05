@@ -13,6 +13,8 @@ nav:
       - agno.md
       - tools.md
       - audio-decision-system.md
+      - audio-benchmark-results.md
+      - audio-benchmark-assessment.md
       - vision-benchmark-results.md
       - vision-benchmark-assessment.md
       - glob: "*"

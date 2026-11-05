@@ -263,6 +263,80 @@ class _StubPixelTower(torch.nn.Module):
         return type("O", (), {"last_hidden_state": torch.zeros(b, 4, 32)})()
 
 
+def test_two_recordings_are_not_the_same_input():
+    """The held-out overlap check must compare the *recording*, not the state text around it.
+
+    Every ESC-50 row shares the state text "a recording of an environmental sound", exactly as every
+    CIFAR row shares "a photograph". The vision path learned this the hard way and keyed its input
+    signature on the image; the audio path inherited only half of the fix, so an eval set built from
+    held-out folds was reported as "overlapping training data" and the run refused to call its own
+    numbers held out.
+    """
+    audio = _audio()
+    enc = _encoder(audio)
+    question = {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]}
+    # The ESC-50 shape: identical state text, different recordings.
+    rows = [{"state": {"audio": {"waveform": torch.zeros(16000)}, "text": "same"},
+             "questions": {"q": question}, "expected": {"q": "a"}},
+            {"state": {"audio": {"waveform": torch.ones(16000)}, "text": "same"},
+             "questions": {"q": question}, "expected": {"q": "b"}}]
+    items, skipped = items_from_rows(_StubTok(), rows, max_len=512, head_max_len=192,
+                                     audio=audio, encode_audio=_encode_audio(enc))
+    assert skipped == {}, skipped
+    keys = [it["audio_key"] for it in items]
+    assert keys[0] != keys[1], "two different recordings must not share an input signature"
+    # ... and the text half alone cannot tell them apart, which is the bug's shape.
+    assert len({tuple(it["state_ids"]) for it in items}) == 1
+
+
+def test_parallel_encoding_gives_the_same_items_as_serial():
+    """`encode_workers` is a speed knob: the items must be identical, block for block.
+
+    The build is where a media run spends most of its time (a frozen tower over every input), so the
+    trainer encodes the distinct inputs in threads. The measurement behind the default: 9.2 clips/s
+    serially against 18.9 with eight threads on this 56-core machine.
+    """
+    audio = _audio()
+    enc = _encoder(audio)
+    question = {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]}
+    rows = [{"state": {"audio": {"waveform": torch.full((16000,), float(i) / 8.0)}, "text": "t"},
+             "questions": {"q": question}, "expected": {"q": "ab"[i % 2]}} for i in range(6)]
+    serial, skipped_a = items_from_rows(_StubTok(), rows, max_len=512, head_max_len=192,
+                                        audio=audio, encode_audio=_encode_audio(enc),
+                                        encode_workers=1)
+    parallel, skipped_b = items_from_rows(_StubTok(), rows, max_len=512, head_max_len=192,
+                                          audio=audio, encode_audio=_encode_audio(enc),
+                                          encode_workers=4)
+    assert skipped_a == skipped_b == {}, (skipped_a, skipped_b)
+    assert len(serial) == len(parallel) == 6
+    for a, b in zip(serial, parallel):
+        assert torch.equal(a["audio_frames"], b["audio_frames"])
+        assert a["state_ids"] == b["state_ids"] and a["target"] == b["target"]
+        assert a["audio_key"] == b["audio_key"]
+
+
+def test_parallel_encoding_still_costs_one_tower_pass_per_recording():
+    audio = _audio()
+    enc = _encoder(audio)
+
+    class _Counting:
+        def __init__(self, inner):
+            self.inner = inner
+            self.calls = 0
+
+        def __call__(self, waveform):
+            self.calls += 1
+            return self.inner(waveform)
+
+    counting = _Counting(_encode_audio(enc))
+    question = {"type": "choice", "instructions": "pick", "criteria": ["a", "b"]}
+    rows = [{"state": {"audio": {"waveform": torch.zeros(16000)}},
+             "questions": {"q1": question, "q2": question}, "expected": {"q1": "a", "q2": "b"}}]
+    items, _ = items_from_rows(_StubTok(), rows, max_len=512, head_max_len=192,
+                               audio=audio, encode_audio=counting, encode_workers=4)
+    assert len(items) == 2 and counting.calls == 1, (len(items), counting.calls)
+
+
 def test_a_text_row_is_still_skipped_when_it_has_nothing_to_read():
     items, skipped = items_from_rows(_StubTok(), [{"state": "  ", "questions": {
         "q": {"type": "choice", "instructions": "pick", "criteria": ["a"]}},
@@ -424,6 +498,9 @@ if __name__ == "__main__":
     test_one_recording_asked_many_questions_costs_one_tower_pass()
     test_a_sound_only_row_is_a_legal_training_item()
     test_a_row_with_both_a_picture_and_a_sound_is_skipped_by_name()
+    test_two_recordings_are_not_the_same_input()
+    test_parallel_encoding_gives_the_same_items_as_serial()
+    test_parallel_encoding_still_costs_one_tower_pass_per_recording()
     test_a_text_row_is_still_skipped_when_it_has_nothing_to_read()
     test_encoding_an_audio_item_produces_a_plan_and_keeps_the_markers()
     test_a_chunk_mixing_pictures_and_sounds_is_refused()

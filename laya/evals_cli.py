@@ -279,6 +279,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ablate.add_argument("--modality", choices=("image", "audio"), default="image",
                         help="which input to remove: 'image' (the default, and the original "
                              "form of this gate) or 'audio' (a recording)")
+    ablate.add_argument("--batch-size", type=int, default=1, metavar="N",
+                        help="rows per forward pass when re-answering; the default '1' keeps "
+                             "the gate comparable to published one-state-at-a-time numbers, and a "
+                             "larger N is 6-8x faster on a CPU with the same arithmetic")
     ablate.add_argument("--min-gain", type=float, metavar="X",
                         help="fail unless accuracy drops by at least X when the input is removed "
                              "(the spec's gate for an image-required family is 0.35)")
@@ -292,6 +296,10 @@ def _build_parser() -> argparse.ArgumentParser:
     flip.add_argument("--model", help="force a checkpoint instead of auto-routing")
     flip.add_argument("--device", help="torch device, e.g. cpu or cuda")
     flip.add_argument("--seed", type=int, default=0, help="permutation seed (default 0)")
+    flip.add_argument("--batch-size", type=int, default=1, metavar="N",
+                      help="rows per forward pass when re-answering; the default '1' is one "
+                           "row per pass, and the permuted pass asks each row a different "
+                           "question, so it batches per question")
     flip.add_argument("--max-flip-rate", type=float, metavar="X",
                       help="fail unless the flip rate is at most X (a state-conditioned design "
                            "should reach 0; 0.02 is a reasonable ceiling)")
@@ -431,7 +439,8 @@ def _cmd_ablate(args) -> int:
         from .evals_audio import audio_ablation
 
         dataset = evals.Dataset.from_jsonl(args.dataset)
-        report = audio_ablation(_load_runner(args), dataset, min_gain=args.min_gain)
+        report = audio_ablation(_load_runner(args), dataset, min_gain=args.min_gain,
+                                batch_size=args.batch_size)
         _emit(report, args.json)
         if report["rows_with_audio"] == 0:
             print("no row carries a sound; nothing to ablate", file=sys.stderr)
@@ -440,7 +449,8 @@ def _cmd_ablate(args) -> int:
     from .evals_vision import image_ablation
 
     dataset = evals.Dataset.from_jsonl(args.dataset)
-    report = image_ablation(_load_runner(args), dataset, min_gain=args.min_gain)
+    report = image_ablation(_load_runner(args), dataset, min_gain=args.min_gain,
+                            batch_size=args.batch_size)
     _emit(report, args.json)
     if report["rows_with_image"] == 0:
         print("no row carries an image; nothing to ablate", file=sys.stderr)
@@ -454,7 +464,8 @@ def _cmd_flip(args) -> int:
 
     dataset = evals.Dataset.from_jsonl(args.dataset)
     report = option_order_flip_rate(_load_runner(args), dataset, seed=args.seed,
-                                    max_flip_rate=args.max_flip_rate)
+                                    max_flip_rate=args.max_flip_rate,
+                                    batch_size=args.batch_size)
     _emit(report, args.json)
     if report["questions_compared"] == 0:
         print("no choice question was answered twice; nothing to compare", file=sys.stderr)

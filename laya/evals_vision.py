@@ -17,15 +17,15 @@ a probability the caller can act on.
 
 Neither function needs a vision checkpoint to exist to be useful: the ablation gate runs happily
 against a text runner and reports a gain of zero, which is the correct answer for a text model.
-Both call `runner.predict(state, questions)` one row at a time, deliberately: batching would make
-the two passes differ in padding and numerics, and a gate whose two halves are not directly
-comparable is not a gate.
+Both answer every row on its own by default, so a gate number stays comparable to published
+one-state-at-a-time results; `batch_size` re-answers with several rows per pass (grouped by question
+set), and both passes are always batched the same way, so the comparison holds.
 """
 import random
 from typing import Any, Dict, Optional
 
 from .evals import Dataset
-from .evals_media import ablation, ask as _ask
+from .evals_media import ablation, ask, ask_many
 from .vision import IMAGE_KEYS
 
 # The two passes a gate compares. Named so a report says which side a number came from.
@@ -51,7 +51,8 @@ def strip_image(state: Any) -> Any:
 
 
 def image_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None,
-                   min_text_change: float = 0.01) -> Dict[str, Any]:
+                   min_text_change: float = 0.01,
+                   batch_size: int = 1) -> Dict[str, Any]:
     """Gate 1: how much of the accuracy depends on the image actually being there.
 
     Runs every row twice -- as given, and with the image stripped -- and reports accuracy on both
@@ -71,7 +72,8 @@ def image_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None
     modalities' numbers are produced by the same arithmetic.
     """
     return ablation(runner, dataset, gate="vision-necessity", noun="image", keys=IMAGE_KEYS,
-                    min_gain=min_gain, min_text_change=min_text_change)
+                    min_gain=min_gain, min_text_change=min_text_change,
+                    batch_size=batch_size)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -113,7 +115,8 @@ def _answer_value(answer: Dict[str, Any]) -> Any:
 
 
 def option_order_flip_rate(runner, dataset: Dataset, *, seed: int = 0,
-                           max_flip_rate: Optional[float] = None) -> Dict[str, Any]:
+                           max_flip_rate: Optional[float] = None,
+                           batch_size: int = 1) -> Dict[str, Any]:
     """Gate 2b: how often permuting a choice question's options changes the chosen label.
 
     Reports the flip rate overall and per tag, over the *choice* answers both passes produced: a
@@ -127,10 +130,13 @@ def option_order_flip_rate(runner, dataset: Dataset, *, seed: int = 0,
     flips = compared = unanswered = 0
     per_tag_total: Dict[str, int] = {}
     per_tag_flips: Dict[str, int] = {}
-    for example in dataset.examples:
-        first = _ask(runner, example.state, example.questions, example.model)
-        second = _ask(runner, example.state, permuted_questions(example.questions, rng),
-                      example.model)
+    # The permuted pass asks every row a *different* question (its own permutation), so it cannot
+    # share one batch; the first pass has a uniform question set and batches normally. Both passes
+    # still answer the same rows in the same order, which is what the comparison needs.
+    firsts = ask_many(runner, dataset.examples, batch_size=batch_size)
+    seconds = [ask(runner, example.state, permuted_questions(example.questions, rng), example.model)
+               for example in dataset.examples]
+    for example, first, second in zip(dataset.examples, firsts, seconds):
         for qid, body in example.questions.items():
             if body.get("type") != "choice":
                 continue

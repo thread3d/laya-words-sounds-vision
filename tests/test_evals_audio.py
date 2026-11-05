@@ -118,6 +118,59 @@ def test_a_run_below_the_threshold_fails_and_one_above_it_passes():
     assert report["passed"] is False, report
 
 
+# -- batching, shared by both gates -----------------------------------------------------------
+
+class _Batched(_Scripted):
+    """A runner that also answers batches, the way `Agent.predict_batch` does."""
+
+    def __init__(self, answer):
+        super().__init__(answer)
+        self.batch_calls = []
+        self.states = []
+
+    def predict_batch(self, states, questions):
+        self.batch_calls.append(len(states))
+        self.states.extend(states)
+        return [{"answers": {qid: self.answer(state, qid) for qid in questions}} for state in states]
+
+
+def test_a_batched_gate_gives_the_same_number_as_a_single_row_gate():
+    """Batching is a speed knob: the gate's arithmetic must not move with it.
+
+    A few hundred rows through one forward pass each is what made the ablation impractical on a
+    CPU (measured: ~4 s per decision for a 50-option question, so 400 rows x 2 passes is an hour).
+    The fix is `--batch-size`, and this is the test that it changes only the number of passes.
+    """
+    def answer(state, qid):
+        return _choice("a" if _hears(state) else "b")
+
+    dataset = Dataset([_row({"audio": {"waveform": 1}, "text": "t"}),
+                       _row({"audio": {"waveform": 2}, "text": "t"}),
+                       _row("plain text")])
+    single = audio_ablation(_Batched(answer), dataset, batch_size=1)
+    batched = audio_ablation(_Batched(answer), dataset, batch_size=4)
+    assert single["per_tag"] == batched["per_tag"], (single["per_tag"], batched["per_tag"])
+    assert single["gain"] == batched["gain"] == 1.0
+    assert single["rows_with_audio"] == batched["rows_with_audio"] == 2
+
+
+def test_the_batched_gate_sends_rows_that_share_a_question_set_together():
+    runner = _Batched(lambda state, qid: _choice("a" if _hears(state) else "b"))
+    dataset = Dataset([_row({"audio": {"waveform": i}, "text": "t"}) for i in range(8)])
+    audio_ablation(runner, dataset, batch_size=4)
+    assert runner.batch_calls, "the gate never batched"
+    assert max(runner.batch_calls) == 4, runner.batch_calls
+    assert len(runner.states) >= 8, len(runner.states)
+
+
+def test_a_runner_without_predict_batch_is_asked_one_row_at_a_time():
+    runner = _Scripted(lambda state, qid: _choice("a" if _hears(state) else "b"))
+    assert not hasattr(runner, "predict_batch")
+    report = audio_ablation(runner, Dataset([_row({"audio": {"waveform": 1}, "text": "t"})]),
+                            batch_size=8)
+    assert report["gain"] == 1.0, report
+
+
 # -- the option-order gate is modality-agnostic ----------------------------------------------
 
 def test_permuting_a_sound_question_is_the_same_question():
@@ -150,5 +203,8 @@ if __name__ == "__main__":
     test_per_tag_slices_are_reported()
     test_a_run_below_the_threshold_fails_and_one_above_it_passes()
     test_permuting_a_sound_question_is_the_same_question()
+    test_a_batched_gate_gives_the_same_number_as_a_single_row_gate()
+    test_the_batched_gate_sends_rows_that_share_a_question_set_together()
+    test_a_runner_without_predict_batch_is_asked_one_row_at_a_time()
     test_a_sound_runner_s_flip_rate_is_reported()
     print("all audio gate tests passed")

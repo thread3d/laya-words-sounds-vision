@@ -97,3 +97,6 @@ research/*_benchmark_results.json
 # local checkpoint weights, kept out of the tree
 # (fetch them with: python verify/checkpoints.py --fetch)
 models/
+
+# Audio benchmark data, checkpoints and cached features (research/benchmarks/audio_esc50).
+.audio-bench/
