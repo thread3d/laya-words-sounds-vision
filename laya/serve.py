@@ -1035,7 +1035,13 @@ def _state_length_lower_bound_over(state: Any, cap: int) -> int:
 IMAGE_REQUEST_KEYS = ("image", "image_path", "image_url", "image_base64")
 
 
-def _image_limit(name: str, raw: Optional[str], default: int) -> int:
+def _positive_limit(name: str, raw: Optional[str], default: int) -> int:
+    """A positive integer from the environment, or the server's own default.
+
+    Named for what it checks rather than for images: the byte and duration caps on a recording come
+    through here too, and a function called `_image_limit` silently answering for `LAYA_MAX_AUDIO_BYTES`
+    is the kind of name that stops being true without anyone noticing.
+    """
     if raw is None or not raw.strip():
         return default
     try:
@@ -1081,10 +1087,10 @@ def _resolve_image_state(state: Any) -> Any:
     try:
         data = _vision.read_image_bytes(
             spec,
-            max_bytes=_image_limit("LAYA_MAX_IMAGE_BYTES",
+            max_bytes=_positive_limit("LAYA_MAX_IMAGE_BYTES",
                                    os.environ.get("LAYA_MAX_IMAGE_BYTES"),
                                    _vision.MAX_IMAGE_BYTES),
-            max_pixels=_image_limit("LAYA_MAX_IMAGE_PIXELS",
+            max_pixels=_positive_limit("LAYA_MAX_IMAGE_PIXELS",
                                     os.environ.get("LAYA_MAX_IMAGE_PIXELS"),
                                     _vision.MAX_IMAGE_PIXELS),
             allow_url=_image_urls_allowed())
@@ -1134,7 +1140,7 @@ def _resolve_audio_state(state: Any) -> Any:
     try:
         data = _audio.read_audio_bytes(
             spec,
-            max_bytes=_image_limit("LAYA_MAX_AUDIO_BYTES",
+            max_bytes=_positive_limit("LAYA_MAX_AUDIO_BYTES",
                                    os.environ.get("LAYA_MAX_AUDIO_BYTES"),
                                    _audio.MAX_AUDIO_BYTES),
             max_seconds=_seconds_limit("LAYA_MAX_AUDIO_SECONDS",
