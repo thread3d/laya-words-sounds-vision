@@ -60,4 +60,6 @@ re-exported from the top-level package. `laya-train` is its command line. The
 
 ::: laya.train.attach_projector
 
+::: laya.train.attach_audio_projector
+
 ::: laya.train.save_checkpoint

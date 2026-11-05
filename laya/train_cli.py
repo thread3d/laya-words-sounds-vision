@@ -174,6 +174,17 @@ def build_parser() -> argparse.ArgumentParser:
              "without a block.",
     )
     parser.add_argument(
+        "--audio",
+        nargs="?",
+        const="{}",
+        default=None,
+        metavar="JSON",
+        help="Train this checkpoint with sound support by adding an \"audio\" block to its "
+             "config. With no value, the defaults apply (wav2vec2 base, 32 audio tokens at 16 kHz); "
+             "pass a JSON object to override, e.g. --audio '{\"n_audio_tokens\": 16}'. A "
+             "checkpoint may carry both --vision and --audio; a state carries one or the other.",
+    )
+    parser.add_argument(
         "--option-layout",
         dest="option_layout",
         choices=("sequential", "parallel", "state_conditioned"),
@@ -222,6 +233,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   % type(vision).__name__, file=sys.stderr)
             return 2
 
+    audio = None
+    if args.audio is not None:
+        try:
+            audio = json.loads(args.audio)
+        except ValueError as exc:
+            print("laya-train: error: --audio is not valid JSON: %s" % exc, file=sys.stderr)
+            return 2
+        if not isinstance(audio, dict):
+            print("laya-train: error: --audio must be a JSON object, got %s"
+                  % type(audio).__name__, file=sys.stderr)
+            return 2
+
     shuffle_opts = ("choice",) if args.shuffle_options else ()
     config = TrainConfig(
         epochs=args.epochs,
@@ -244,6 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         target_error=args.target_error,
         min_abstain_n=args.min_abstain_n,
         vision=vision,
+        audio=audio,
         option_layout=args.option_layout,
     )
 

@@ -44,6 +44,10 @@ from .calibrate import MIN_TYPE_N, fit_abstention_thresholds, fit_temperature_ma
 from .vision import (VISION_WEIGHTS_FILE, VisualCache, build_vision_encoder, load_pixels,
                      load_vision_weights, local_tower_dir, parse_vision, split_state,
                      visual_plan)
+from .audio import (AUDIO_WEIGHTS_FILE, AudioCache, audio_plan, build_audio_encoder,
+                    load_audio_weights, load_waveform, parse_audio)
+from .audio import local_tower_dir as local_audio_tower_dir
+from .audio import split_state as split_audio_state
 from .common import (
     uses_state_conditioned_layout,
     OPTION_LAYOUTS,
@@ -113,6 +117,10 @@ class TrainConfig:
     # checkpoint, which is the only way a vision checkpoint can come into existence -- the base
     # checkpoints ship without one.
     vision: Optional[Dict[str, Any]] = None
+    # The checkpoint's `"audio"` block, on exactly the same terms: `None` leaves the checkpoint as
+    # it is, and a mapping adds the block. A checkpoint may declare both blocks; a *state* carries
+    # one input or the other, never both.
+    audio: Optional[Dict[str, Any]] = None
     option_layout: Optional[str] = None
     freeze_encoder: bool = False
     calib_max: int = 400
@@ -133,8 +141,8 @@ class TrainConfig:
     target_error: float = 0.10
     min_abstain_n: int = 10
 
-    def resolve_loss(self, has_vision: bool) -> str:
-        """The objective to train with, given whether the checkpoint carries vision support.
+    def resolve_loss(self, has_vision: bool, has_audio: bool = False) -> str:
+        """The objective to train with, given whether the checkpoint carries a block.
 
         `loss=None` means "the default for this checkpoint", and the default differs by design.
         `rlcd` is what the text checkpoints were trained with, but for a vision checkpoint the
@@ -145,7 +153,7 @@ class TrainConfig:
         """
         if self.loss is not None:
             return self.loss
-        return "soft-ce" if has_vision else "rlcd"
+        return "soft-ce" if (has_vision or has_audio) else "rlcd"
 
     def validate(self) -> None:
         if self.vision is not None:
@@ -155,14 +163,20 @@ class TrainConfig:
             # Parsed here so a typo in a key fails at argument parsing rather than after the
             # checkpoint has loaded and the dataset has been read.
             parse_vision({"vision": dict(self.vision)})
+        if self.audio is not None:
+            if not isinstance(self.audio, dict):
+                raise ValueError("audio must be a mapping or None, got %r" % (self.audio,))
+            from .audio import parse_audio
+            parse_audio({"audio": dict(self.audio)})
         if self.modality_dropout:
             if isinstance(self.modality_dropout, bool) or not (0.0 <= self.modality_dropout < 1.0):
                 raise ValueError("modality_dropout must be in [0, 1), got %r"
                                  % (self.modality_dropout,))
             if self.modality_dropout >= 0.5:
                 raise ValueError(
-                    "modality_dropout=%r would train most items without their image, which is how "
-                    "a vision checkpoint becomes a text one" % (self.modality_dropout,))
+                    "modality_dropout=%r would train most items without the input the decision "
+                    "is about, which is how a multimodal checkpoint becomes a text one"
+                    % (self.modality_dropout,))
         if self.loss is not None and self.loss not in LOSSES:
             raise ValueError("loss must be one of %s (or None for the checkpoint default), got %r"
                              % (", ".join(LOSSES), self.loss))
@@ -361,7 +375,8 @@ def make_item(tok, q: Dict[str, Any], target: Sequence[float], state_ids: List[i
 def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                     head_max_len: int,
                     label_smoothing: float = 0.0,
-                    vision=None, encode_visual=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+                    vision=None, encode_visual=None,
+                    audio=None, encode_audio=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Items from `{state, questions, gold}` or `{state, questions, expected}` rows; returns `(items, skipped)`.
 
     With `vision` set and `encode_visual` supplied (a callable pixels -> `[n_visual, hidden]`),
@@ -378,10 +393,13 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
     """
     items, skipped = [], {}
     cache = VisualCache() if (vision is not None and encode_visual is not None) else None
+    audio_cache = AudioCache() if (audio is not None and encode_audio is not None) else None
     for row in rows:
         state = row.get("state")
         visual = None
         visual_key = None
+        audio_frames = None
+        audio_key = None
         text_budget = max_len
         if vision is not None and encode_visual is not None and state is not None:
             state, image_spec = split_state(state)
@@ -396,9 +414,26 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                 if text_budget < 16:
                     skipped["image_too_large"] = skipped.get("image_too_large", 0) + 1
                     continue
+        if audio is not None and encode_audio is not None and state is not None:
+            state, audio_spec = split_audio_state(state)
+            if audio_spec is not None:
+                if visual is not None:
+                    # One sequence carries one spliced block; a row that names both inputs is a
+                    # dataset bug, and training it as whichever half was parsed first would report
+                    # a number for a task the run never measured.
+                    skipped["both_modalities"] = skipped.get("both_modalities", 0) + 1
+                    continue
+                waveform = load_waveform(audio_spec, audio.sample_rate)
+                audio_frames = audio_cache.get_or_encode(waveform, encode_audio)
+                # The recording's identity, for the same reason `visual_key` exists.
+                audio_key = AudioCache.key(waveform)
+                text_budget = max_len - audio.n_audio_tokens
+                if text_budget < 16:
+                    skipped["audio_too_large"] = skipped.get("audio_too_large", 0) + 1
+                    continue
         if state is None or (isinstance(state, str) and not state.strip()):
-            # An image on its own is a legal state (spec §6.5): the picture is the evidence.
-            if visual is None:
+            # An input on its own is a legal state (spec §6.5): it is the evidence.
+            if visual is None and audio_frames is None:
                 skipped["empty_text"] = skipped.get("empty_text", 0) + 1
                 continue
             state = ""
@@ -431,6 +466,10 @@ def items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int,
                     # Patches, projected later inside the training step (see `_visual_encoder_fn`).
                     item["visual_patches"] = visual
                     item["visual_key"] = visual_key
+                if audio_frames is not None:
+                    # Frames, projected later inside the step (see `_audio_encoder_fn`).
+                    item["audio_frames"] = audio_frames
+                    item["audio_key"] = audio_key
                 items.append(item)
             else:
                 skipped[reason] = skipped.get(reason, 0) + 1
@@ -467,8 +506,30 @@ def attach_projector(encoder, model_dir: str, base_declares_vision: bool) -> str
             "(n_visual_tokens=%d)" % encoder.config.n_visual_tokens)
 
 
+def attach_audio_projector(encoder, model_dir: str, base_declares_audio: bool) -> str:
+    """Restore the base checkpoint's audio projector, or refuse, or say a new one is being made.
+
+    The same three outcomes as :func:`attach_projector`, for the same reason: the projector lives
+    beside the weights rather than in `state_dict()`, so building the encoder returns a randomly
+    initialised one. Starting a run from an audio checkpoint without restoring it would train a
+    head against noise -- and then report numbers for the projector it just created, not for the
+    checkpoint it loaded.
+    """
+    if os.path.exists(os.path.join(model_dir, AUDIO_WEIGHTS_FILE)):
+        load_audio_weights(encoder, model_dir)
+        return ("continuing from the base checkpoint's projector (%s)" % AUDIO_WEIGHTS_FILE)
+    if base_declares_audio:
+        raise FileNotFoundError(
+            "%r declares audio support but carries no %r. Refusing to start from a randomly "
+            "initialised projector: it would train a head against noise and report numbers that "
+            "look like a working checkpoint." % (model_dir, AUDIO_WEIGHTS_FILE))
+    return ("base checkpoint has no projector; this run trains a new one "
+            "(n_audio_tokens=%d)" % encoder.config.n_audio_tokens)
+
+
 def eval_items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int, head_max_len: int,
-                         vision=None, encode_visual=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+                         vision=None, encode_visual=None, audio=None,
+                         encode_audio=None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """The `--eval` rows, built through the *same* modality path the training rows used.
 
     An eval set exists to answer "how good is this checkpoint", and for a vision checkpoint the
@@ -482,7 +543,8 @@ def eval_items_from_rows(tok, rows: Iterable[Dict[str, Any]], max_len: int, head
     `label_smoothing=0.0` stays: the eval report is about accuracy, not the training target.
     """
     return items_from_rows(tok, rows, max_len, head_max_len, label_smoothing=0.0,
-                           vision=vision, encode_visual=encode_visual)
+                           vision=vision, encode_visual=encode_visual,
+                           audio=audio, encode_audio=encode_audio)
 
 
 def rows_from_csv(path: str, text_column: str = "text", label_column: str = "label",
@@ -569,20 +631,25 @@ def read_jsonl(path: str) -> List[Dict[str, Any]]:
 def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
                 option_order: Optional[List[int]] = None, parallel: bool = False,
                 vision=None, drop_visual: bool = False,
-                max_positions: int = 8192, only_option: Optional[int] = None) -> Dict[str, Any]:
+                max_positions: int = 8192, only_option: Optional[int] = None,
+                audio=None, drop_audio: bool = False) -> Dict[str, Any]:
     """The model input for an item, with options in `option_order` and the target to match.
 
     `build_sequence` puts option `option_order[s]` in slot `s`, so the slot-ordered target is
     `target[option_order[s]]` -- the inverse of what `unpermute_probs` does at inference.
 
-    A vision item carries its encoded `visual` block; `drop_visual` trains it as text-only, which
-    is what modality dropout does, and the text budget is `max_len - n_visual` so the spliced
-    sequence still fits the checkpoint's own `max_len` (the budget inference uses).
+    A vision item carries its encoded `visual` block and an audio item its `audio` block;
+    `drop_visual` / `drop_audio` train it as text-only, which is what modality dropout does, and
+    the text budget is `max_len - n_*_tokens` so the spliced sequence still fits the checkpoint's
+    own `max_len` (the budget inference uses).
     """
     visual = item.get("visual") if vision is not None else None
+    audio_frames = item.get("audio") if audio is not None else None
     budget = max_len
     if visual is not None and vision is not None:
         budget = max_len - vision.n_visual_tokens
+    elif audio_frames is not None and audio is not None:
+        budget = max_len - audio.n_audio_tokens
     ids, markers, *layout = build_sequence(tok, None, item["q"], budget, head_max_len,
                                            option_order=option_order,
                                            state_ids=item["state_ids"], return_layout=parallel,
@@ -605,6 +672,16 @@ def encode_item(tok, item: Dict[str, Any], max_len: int, head_max_len: int,
                            option_tokens=item.get(
                                "option_tokens", (len(head_ids) - markers[0]) if markers else 0))
         encoded["visual"] = visual
+        encoded["plan"] = plan
+        encoded["markers"] = plan.marker_positions
+    if audio_frames is not None and audio is not None and not drop_audio:
+        head_ids, _, _ = build_head(tok, item["q"], head_max_len, option_order=option_order,
+                                    only_option=only_option)
+        plan = audio_plan(audio, text_len=len(ids), markers=markers, head_len=len(head_ids),
+                          max_len=max_len, max_position_embeddings=max_positions,
+                          option_tokens=item.get(
+                              "option_tokens", (len(head_ids) - markers[0]) if markers else 0))
+        encoded["audio"] = audio_frames
         encoded["plan"] = plan
         encoded["markers"] = plan.marker_positions
     return encoded
@@ -781,6 +858,13 @@ def save_checkpoint(model, tok, cfg: Dict[str, Any], path: str) -> None:
         save_vision_weights(vision_encoder, path)
         # And the tower itself, so the checkpoint does not need the Hub at inference time.
         bundle_tower(vision_encoder, path)
+    audio_encoder = getattr(model, "audio_encoder", None)
+    if audio_encoder is not None:
+        from .audio import bundle_tower as bundle_audio_tower
+        from .audio import save_audio_weights
+        save_audio_weights(audio_encoder, path)
+        # And the tower itself, so the checkpoint does not need the Hub at inference time.
+        bundle_audio_tower(audio_encoder, path)
     model.encoder.config.save_pretrained(os.path.join(path, "encoder"))
     tok.save_pretrained(os.path.join(path, "tokenizer"))
     tmp = os.path.join(path, "rl_agent_config.json.tmp")
@@ -879,19 +963,58 @@ def _project_visual(item, projector, vision=None):
     return projected
 
 
-def collate_training_batch(chunk: Sequence[Dict[str, Any]], pad_id: int, embed_fn=None):
-    """Collate encoded items, through the visual path when any of them carries a block.
+def _audio_encoder_fn(encoder):
+    """`waveform [T]` -> the tower's **frame tokens** `[N, tower_dim]`.
 
-    A mixed chunk -- some rows with an image, some without -- is legitimate and is what modality
-    dropout produces, so the decision is per chunk rather than per run: if a single row has a
-    visual block, every row of the chunk is spliced and the ones without simply have none.
+    Frames, not the projected block, for the reason `_visual_encoder_fn` gives for patches: the
+    tower is frozen, so caching its output is honest, while the projector is trained and therefore
+    has to run inside the step (`_project_audio`). The cache is kept on the CPU for the same reason
+    too -- a wav2vec-style tower emits ~50 frames per second, which is far more rows per item than
+    an image's patch grid.
     """
-    if any("visual" in it for it in chunk):
+    def encode(waveform):
+        with torch.no_grad():
+            return encoder.encode_frames(waveform.unsqueeze(0))[0].detach().to("cpu")
+    return encode
+
+
+def _project_audio(item, projector, audio=None):
+    """Run the trainable projector over a cached frame buffer, inside the graph."""
+    frames = item.get("audio_frames")
+    if frames is None:
+        return item
+    summary = bool(audio is not None and "option_tokens" in item
+                   and audio.summary_wanted(item["option_tokens"]))
+    device = next(iter(projector.parameters())).device
+    projected = dict(item)
+    projected["audio"] = projector(frames.unsqueeze(0).to(device), summary=summary)[0]
+    return projected
+
+
+def collate_training_batch(chunk: Sequence[Dict[str, Any]], pad_id: int, embed_fn=None):
+    """Collate encoded items, through the block path when any of them carries one.
+
+    A mixed chunk -- some rows with an input, some without -- is legitimate and is what modality
+    dropout produces, so the decision is per chunk rather than per run: if a single row has a
+    block, every row of the chunk is spliced and the ones without simply have none. A chunk may
+    carry pictures or sounds, never both: one batch is one forward pass with one block per row.
+    """
+    from .audio import collate_audio
+    from .vision import collate_visual
+
+    carries_visual = any("visual" in it for it in chunk)
+    carries_audio = any("audio" in it for it in chunk)
+    if carries_visual or carries_audio:
         if embed_fn is None:
-            raise ValueError("a chunk carrying a visual block needs `embed_fn` to embed the text "
-                             "half; pass the encoder's own token-embedding lookup")
-        from .vision import collate_visual
-        return collate_visual(list(chunk), embed_fn, pad_id)
+            raise ValueError("a chunk carrying a block needs `embed_fn` to embed the text half; "
+                             "pass the encoder's own token-embedding lookup")
+        if carries_visual and carries_audio:
+            raise ValueError("this chunk mixes rows with a picture and rows with a sound; one batch "
+                             "is one forward pass with one spliced block per row, so split the "
+                             "batch by modality")
+        if carries_visual:
+            return collate_visual(list(chunk), embed_fn, pad_id)
+        return collate_audio(list(chunk), embed_fn, pad_id)
     return collate_items([list(chunk)], pad_id)
 
 
@@ -931,7 +1054,8 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
                 max_len: int, head_max_len: int,
                 on_epoch_end: Optional[Callable[[int, float], None]] = None,
                 parallel: bool = False, vision=None, embed_fn=None,
-                max_positions: int = 8192, state_conditioned: bool = False) -> List[float]:
+                max_positions: int = 8192, state_conditioned: bool = False,
+                audio=None, audio_projector=None) -> List[float]:
     """Train `model` in place on `items`; returns the mean loss of each epoch.
 
     `vision` is the checkpoint's parsed vision config and `embed_fn` its token-embedding lookup.
@@ -970,10 +1094,22 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
         projector.to(device)
         for parameter in projector.parameters():
             parameter.requires_grad_(True)
+    # The audio projector has the same problem and the same fix: it is not in `state_dict()`, so
+    # `model.parameters()` does not see it and it would never be optimised.
+    audio_encoder = getattr(model, "audio_encoder", None)
+    if audio_encoder is not None:
+        audio_projector = audio_encoder.projector
+        audio_projector.to(device)
+        for parameter in audio_projector.parameters():
+            parameter.requires_grad_(True)
+    has_block = vision is not None or audio is not None
     groups = [{"params": [p for n, p in model.named_parameters()
                           if not n.startswith("encoder.") and p.requires_grad], "lr": config.head_lr}]
     if projector is not None:
         groups.append({"params": [p for p in projector.parameters() if p.requires_grad],
+                       "lr": config.head_lr})
+    if audio_projector is not None:
+        groups.append({"params": [p for p in audio_projector.parameters() if p.requires_grad],
                        "lr": config.head_lr})
     if not config.freeze_encoder:
         groups.insert(0, {"params": [p for n, p in model.named_parameters()
@@ -1005,9 +1141,14 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
             chunk = []
             groups = []          # one entry per row: which question of this window it scores
             for position, it in enumerate(window):
-                dropped = bool(vision is not None and config.modality_dropout
+                dropped = bool(has_block and config.modality_dropout
                                and order_rng.random() < config.modality_dropout)
-                source = it if (dropped or projector is None) else _project_visual(it, projector, vision)
+                source = it
+                if not dropped:
+                    if projector is not None:
+                        source = _project_visual(source, projector, vision)
+                    if audio_projector is not None:
+                        source = _project_audio(source, audio_projector, audio)
                 order = draw_option_order(it, order_rng, config.shuffle_options)
                 if state_conditioned:
                     # One row per option. The row's own target is the weight that option carries
@@ -1016,16 +1157,17 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
                     for slot in range(it["k"]):
                         encoded = encode_item(tok, source, max_len, head_max_len, order, parallel,
                                               vision=vision, max_positions=max_positions,
-                                              drop_visual=dropped, only_option=slot)
+                                              drop_visual=dropped, only_option=slot,
+                                              audio=audio, drop_audio=dropped)
                         encoded["target"] = [float(it["target"][order[slot] if order else slot])]
                         chunk.append(encoded)
                         groups.append(position)
                     continue
                 chunk.append(encode_item(tok, source, max_len, head_max_len, order,
                                          parallel, vision=vision, max_positions=max_positions,
-                                         drop_visual=dropped))
+                                         drop_visual=dropped, audio=audio, drop_audio=dropped))
             batch = collate_training_batch(chunk, tok.pad_token_id,
-                                           embed_fn=embed_fn if vision is not None else None)
+                                           embed_fn=embed_fn if has_block else None)
             # `detach_encoder` severs the gradient at the encoder's output. For a text checkpoint
             # that is free: nothing upstream of the encoder has parameters. For a vision one it is
             # not -- the projector sits *upstream*, spliced into the encoder's input embeddings --
@@ -1033,7 +1175,7 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
             # against a projector that never moved. Keep the graph when there is something to
             # train through it, and pay the activation memory the detach existed to save.
             logits = _forward(model, batch, device, amp,
-                              config.freeze_encoder and projector is None)
+                              config.freeze_encoder and projector is None and audio_projector is None)
             mask = batch["marker_mask"].to(device)
             target = batch["target"].to(device)
             if state_conditioned:
@@ -1082,10 +1224,11 @@ def train_model(model, tok, items: Sequence[Dict[str, Any]], config: TrainConfig
 def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: torch.device,
                         max_len: int, head_max_len: int, batch_size: int = 16, parallel: bool = False,
                         vision=None, embed_fn=None, max_positions: int = 8192, projector=None,
-                        state_conditioned: bool = False):
+                        state_conditioned: bool = False, audio=None, audio_projector=None):
     """`(qtype, logits, target, k)` records for `fit_temperature_map`, options in canonical order.
 
-    A vision checkpoint has to be *evaluated* through the vision path. These records feed both the
+    A vision or audio checkpoint has to be *evaluated* through its own path. These records feed both
+    the
     before/after accuracy in the training report and the temperature fit, so skipping the block
     here does not fail loudly: it evaluates a text-only model, reports chance-level accuracy for a
     checkpoint that answers its held-out set at 0.62, and fits a temperature to the wrong
@@ -1097,6 +1240,8 @@ def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: tor
         chunk = items[start:start + batch_size]
         if vision is not None and projector is not None:
             chunk = [_project_visual(it, projector, vision) for it in chunk]
+        if audio is not None and audio_projector is not None:
+            chunk = [_project_audio(it, audio_projector, audio) for it in chunk]
         # A state-conditioned checkpoint reads one row per option, so evaluation has to encode
         # that way too. Building a joint row and slicing `row[:k]` out of a one-marker row does not
         # fail -- it silently scores a sequence the checkpoint never saw, and reports chance-level
@@ -1106,18 +1251,20 @@ def calibration_records(model, tok, items: Sequence[Dict[str, Any]], device: tor
             for it in chunk:
                 for slot in range(it["k"]):
                     row = encode_item(tok, it, max_len, head_max_len, parallel=parallel,
-                                      vision=vision, max_positions=max_positions, only_option=slot)
+                                      vision=vision, max_positions=max_positions, only_option=slot,
+                                      audio=audio)
                     # One marker, so one target weight -- the option's own share of the question's
                     # distribution. The full target belongs to the group, not to the row.
                     row["target"] = [float(it["target"][slot])]
                     encoded.append(row)
         else:
             encoded = [encode_item(tok, it, max_len, head_max_len, parallel=parallel, vision=vision,
-                                   max_positions=max_positions) for it in chunk]
+                                   max_positions=max_positions, audio=audio) for it in chunk]
+        has_block = vision is not None or audio is not None
         batch = collate_training_batch(encoded, tok.pad_token_id,
-                                       embed_fn=embed_fn if vision is not None else None)
+                                       embed_fn=embed_fn if has_block else None)
         logits = _forward(model, batch, device, amp=False,
-                          detach_encoder=vision is None).cpu().numpy()
+                          detach_encoder=not has_block).cpu().numpy()
         cursor = 0
         for it in chunk:
             if state_conditioned:
@@ -1383,6 +1530,12 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     # Whether the *base checkpoint* already declares vision, captured before `--vision` can add the
     # block: the two cases want different answers when the weights file is missing.
     base_declares_vision = parse_vision(cfg) is not None
+    base_declares_audio = parse_audio(cfg) is not None
+    if config.audio is not None:
+        # Same rule as vision: the block has to be in the config before anything is saved, so it
+        # travels with the weights and `laya.load` rebuilds the encoder from it.
+        cfg = dict(cfg, audio=dict(config.audio))
+        print("audio: training with a %r block" % (config.audio,), flush=True)
     if config.vision is not None:
         # Declaring vision support is what turns a text checkpoint into a vision one. It has to
         # happen before `parse_vision` below and before any checkpoint is saved, so the block
@@ -1397,15 +1550,16 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     if config.option_layout is not None:
         cfg = dict(cfg, option_layout=config.option_layout)
     parallel = uses_parallel_layout(cfg)
-    if parallel and parse_vision(cfg) is not None:
-        raise ValueError("a vision checkpoint cannot train on the parallel option layout: its "
-                         "masks are built from token ids and there are none once the visual block "
-                         "is spliced in")
+    if parallel and (parse_vision(cfg) is not None or parse_audio(cfg) is not None):
+        raise ValueError("a checkpoint with a spliced block cannot train on the parallel option "
+                         "layout: its masks are built from token ids and there are none once the "
+                         "block is spliced in")
 
     # Vision. A checkpoint with no "vision" block parses to None and every branch below is
     # skipped, so a text fine-tune is bit-for-bit what it was -- including its objective, which
     # stays `rlcd` while a vision run starts from `soft-ce` (see `TrainConfig.resolve_loss`).
     vision = parse_vision(cfg)
+    audio = parse_audio(cfg)
     max_positions = int(getattr(model.encoder.config, "max_position_embeddings", 8192))
     embed_fn = None
     encode_visual = None
@@ -1432,13 +1586,32 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         encode_visual = _visual_encoder_fn(encoder)
         print("vision checkpoint: tower %s, %d visual tokens, modality dropout %g"
               % (vision.tower, vision.n_visual_tokens, config.modality_dropout), flush=True)
-    config.loss = config.resolve_loss(vision is not None)
+    audio_projector = None
+    encode_audio = None
+    if audio is not None:
+        audio_encoder = build_audio_encoder(audio, hidden_size=model.encoder.config.hidden_size,
+                                            tower_dir=local_audio_tower_dir(model_dir))
+        model.audio_encoder = audio_encoder
+        audio_projector = audio_encoder.projector
+        if embed_fn is None:
+            embed_fn = _embedding_lookup(model)
+        # The same two facts as the vision path: the tower has to be on `dev` before the items are
+        # built (building them is what encodes every recording), and the projector is not restored
+        # by `build_audio_encoder`, so it is attached explicitly or the run starts from noise.
+        print("audio: %s" % (attach_audio_projector(audio_encoder, model_dir,
+                                                    base_declares_audio),), flush=True)
+        audio_encoder.to(dev)
+        encode_audio = _audio_encoder_fn(audio_encoder)
+        print("audio checkpoint: tower %s, %d audio tokens, modality dropout %g"
+              % (audio.tower, audio.n_audio_tokens, config.modality_dropout), flush=True)
+    config.loss = config.resolve_loss(vision is not None, audio is not None)
 
     rows = read_data(data, text_column=config.text_column, label_column=config.label_column,
                      question_id=config.question_id, instructions=config.instructions)
     items, skipped = items_from_rows(tok, rows, max_len, head_max_len,
                                      label_smoothing=config.label_smoothing,
-                                     vision=vision, encode_visual=encode_visual)
+                                     vision=vision, encode_visual=encode_visual,
+                                     audio=audio, encode_audio=encode_audio)
     if not items:
         raise ValueError("%s produced no training items (skipped: %r)" % (data, skipped))
     train_items, calib_items = split_calibration(items, config.calib_max, config.calib_frac, config.calib_seed)
@@ -1455,7 +1628,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         eval_rows = read_data(config.eval_data, text_column=config.text_column, label_column=config.label_column,
                               question_id=config.question_id, instructions=config.instructions)
         eval_items, eval_skipped = eval_items_from_rows(tok, eval_rows, max_len, head_max_len,
-                                                     vision=vision, encode_visual=encode_visual)
+                                                     vision=vision, encode_visual=encode_visual,
+                                                     audio=audio, encode_audio=encode_audio)
 
         if not eval_items:
             eval_mode = None
@@ -1542,7 +1716,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         base_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len,
                                            parallel=parallel, vision=vision, embed_fn=embed_fn,
                                            projector=projector, max_positions=max_positions,
-                                           state_conditioned=uses_state_conditioned_layout(cfg))
+                                           state_conditioned=uses_state_conditioned_layout(cfg),
+                                           audio=audio, audio_projector=audio_projector)
         base_temp = cfg.get("temperature")
         base_temp_by_options = cfg.get("temperature_by_options")
         before_eval = evaluate_records(base_records, base_temp, base_temp_by_options)
@@ -1554,12 +1729,14 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
     history = train_model(model, tok, train_items, config, dev, max_len, head_max_len,
                           on_epoch_end=checkpoint_latest, parallel=parallel,
                           vision=vision, embed_fn=embed_fn, max_positions=max_positions,
-                          state_conditioned=uses_state_conditioned_layout(cfg))
+                          state_conditioned=uses_state_conditioned_layout(cfg),
+                          audio=audio, audio_projector=audio_projector)
 
     records = calibration_records(model, tok, calib_items, dev, max_len, head_max_len,
                                   parallel=parallel, vision=vision, embed_fn=embed_fn,
                                   projector=projector, max_positions=max_positions,
-                                  state_conditioned=uses_state_conditioned_layout(cfg))
+                                  state_conditioned=uses_state_conditioned_layout(cfg),
+                                  audio=audio, audio_projector=audio_projector)
     collapse_msg = prior_collapse_message(records)
     if collapse_msg:
         # Same channel as the weak-calibration notes: a checkpoint that predicts the
@@ -1590,7 +1767,8 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         after_records = calibration_records(model, tok, eval_items, dev, max_len, head_max_len,
                                             parallel=parallel, vision=vision, embed_fn=embed_fn,
                                             projector=projector, max_positions=max_positions,
-                                            state_conditioned=uses_state_conditioned_layout(cfg))
+                                            state_conditioned=uses_state_conditioned_layout(cfg),
+                                            audio=audio, audio_projector=audio_projector)
         after_eval = evaluate_records(after_records, fitted["temperature"], fitted["temperature_by_options"])
         comparison = {
             "delta_accuracy": round(after_eval["accuracy"] - before_eval["accuracy"], 4),

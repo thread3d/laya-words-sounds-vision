@@ -293,6 +293,39 @@ what catches a fusion layer that learned to answer from the text and treat the p
 decoration. `flip` permutes the option list and requires the answer not to move. Both are
 described in [the evaluation harness](evals.md#vision-gates-does-it-actually-look-at-the-image).
 
+## Sounds: teaching a checkpoint to listen
+
+A state may carry a recording, and `--audio` is what turns a checkpoint into one that can read it:
+
+```bash
+laya-train --data items.jsonl --base english --out ./my-audio-checkpoint \
+  --audio '{"n_audio_tokens": 32}'
+```
+
+The recording goes in the state next to the text, as `audio_path`, `audio` (WAV/FLAC/Ogg/MP3 bytes
+or base64) or `audio_waveform` (samples you already decoded); a recording with no text at all is a
+legal state, because the recording is the evidence. `laya.audio.split_state` is the reference for
+the accepted shapes.
+
+What `--audio` costs: a frozen audio tower (Wav2Vec2-base by default, ~95 M parameters) beside the
+text encoder, plus one projected block of `n_audio_tokens` rows spliced into the sequence after the
+options — the same block, layout and projector the vision path uses, so the two modalities cannot
+drift apart. Decoding a container needs `pip install laya[audio]`; PCM WAV decodes with the standard
+library, and samples you pass yourself skip the codec entirely.
+
+The knobs are the audio block's own: `sample_rate` (the rate the tower was trained on, 16 000 by
+default — a 44.1 kHz recording is resampled to it, and a tower fed the wrong rate hears the sound
+stretched), `n_audio_tokens`, `keep_layers`, `pooling`, `summary_for_options_over` and
+`cache_size`. Everything the vision section says about `--option-layout`, the summary row, the
+projector file (`audio.safetensors`) and the before/after table applies here unchanged.
+
+**What is not measured yet.** The vision numbers above come from a published CIFAR-100 run; there is
+no equivalent audio benchmark in this repository yet, so this page states no accuracy figure for a
+sound checkpoint. The gate that matters is the same one — accuracy with the recording removed must
+fall, or the "audio" checkpoint is a text model with an expensive tower — and `laya-evals ablate`
+removes an *image* today. Until it knows about sounds, measure the ablation with an eval file whose
+states carry no `audio` key and compare the two accuracies yourself.
+
 ## Fine-tuning from Python
 
 `laya.train.finetune` is what `laya-train` calls:
