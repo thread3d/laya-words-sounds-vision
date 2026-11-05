@@ -52,11 +52,16 @@ Routing checks inputs in this order:
    A text checkpoint cannot see pixels at all, whatever language the text beside them is in, so
    this rule sits above the language rules — but below `model=` and `task=`, which name a
    checkpoint and still win.
-4. If `auto_task_detection=True`, an exact match against one of the known typed-decisions question
+4. A state that carries a sound (`audio_path`, `audio`, `audio_base64` or `audio_waveform`) goes to
+   the audio checkpoint named by `audio_model` (default `"audio"`), on the same terms: it fires only
+   when that checkpoint is registered, and it sits above the language rules and below `model=` and
+   `task=`. A state carrying both a picture and a sound routes to the vision checkpoint; the model
+   refuses the state itself, because one sequence carries one spliced block.
+5. If `auto_task_detection=True`, an exact match against one of the known typed-decisions question
    ID sets selects `typed-decisions`.
-5. A recognized `lang=` value selects English or multilingual.
-6. A per-call `lang_guess=` or the router's configured `lang_guess` is consulted.
-7. Built-in script and language analysis selects a checkpoint. If there is no reliable language
+6. A recognized `lang=` value selects English or multilingual.
+7. A per-call `lang_guess=` or the router's configured `lang_guess` is consulted.
+8. Built-in script and language analysis selects a checkpoint. If there is no reliable language
    signal, the router uses its configured `default` (multilingual since 0.4.0).
 
 The first matching rule wins. For example, `model="multilingual"` overrides `lang="en"`. Invalid
@@ -332,6 +337,21 @@ the rule off for a router that does have one.
 request never pays for it. See [vision fine-tuning](finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture)
 for how a checkpoint learns to use the picture, and the [vision reference](reference/vision.md) for
 the accepted image forms.
+
+## States that carry a sound
+
+A recording routes the same way, to the checkpoint `audio_model` names (default `"audio"`):
+
+```python
+router = laya.Router(models={"audio": "./my-audio-checkpoint"}, device="cuda")
+router.predict({"audio_path": "clip.wav", "text": "is this a dog barking?"}, question)
+router.predict("Le récapitulatif de la réunion.", question)   # still routed by language
+```
+
+The rule fires only when that checkpoint is registered, `audio_model=None` switches it off, and
+`laya.audio.has_audio(state)` is the predicate — it builds nothing. A state may carry a picture or
+a sound, not both: the model refuses that state by name rather than silently scoring it without one
+of the two. See the [sounds reference](reference/audio.md) for the accepted forms.
 
 ## Choosing an entry point
 

@@ -17,6 +17,8 @@ Three pieces:
 * :class:`AudioEncoder` -- a frozen audio tower plus the projector, which is what turns a waveform
   into the block. The tower is **injected**, so this class is testable with a stub and the caller
   decides what to download.
+* :func:`load_waveform` -- the decode side: a reference becomes a mono waveform at the tower's rate,
+  after the byte and duration caps in :func:`check_audio_bytes` have had their say.
 
 What a sound is *not*, here: a transcript. Nothing in this path runs speech recognition. The tower
 sees the waveform -- prosody, tone, music, a bark, a clap, the words too if the tower learned them --
@@ -387,6 +389,78 @@ def build_audio_encoder(config: AudioConfig, hidden_size: int, tower=None, dtype
 def tower_parameters(encoder: AudioEncoder):
     """The trainable parameters of an audio encoder (the tower stays frozen by default)."""
     return encoder.projector.parameters()
+
+
+# ------------------------------------------------------------------------------------------------
+# Sounds inside a state
+# ------------------------------------------------------------------------------------------------
+
+# Keys a state may use to carry a sound. `text` is the companion text, and it may be absent: a
+# recording on its own is a legal state.
+AUDIO_KEYS = ("audio", "audio_path", "audio_base64", "audio_waveform")
+# Accepted by `has_audio` but not by `split_state`: a URL is something the *caller* resolves, the
+# way the HTTP server resolves an image URL before the model ever sees the state (see
+# `read_audio_bytes`).
+AUDIO_ROUTING_KEYS = AUDIO_KEYS + ("audio_url",)
+
+
+def has_audio(state) -> bool:
+    """Whether a state carries a sound reference -- the routing question, answered cheaply.
+
+    Deliberately narrower than :func:`split_state`: it does not build anything, so the router can
+    ask it on every request without paying for a state it may not need to split.
+    """
+    return isinstance(state, dict) and any(key in state for key in AUDIO_ROUTING_KEYS)
+
+
+def split_state(state):
+    """Separate a state into its text half and its sound spec.
+
+    Returns ``(text_state, audio_spec)``. For anything that carries no sound this is
+    ``(state, None)`` -- the caller only invokes it when the checkpoint has sound support, so a
+    text checkpoint never has a state reshaped underneath it.
+
+    Recognised shapes::
+
+        {"audio": <spec>, "text": "..."}      # explicit
+        {"audio": <spec>}                     # the sound is the whole state
+        {"audio_path": "a.wav"}               # shorthand
+
+    `<spec>` is a path string, a base64 string, raw bytes, or a mapping with a ``waveform`` entry
+    holding an already-decoded tensor/array (which is how a caller with its own decoder, and the
+    tests, bypass the codec and the container).
+    """
+    if not isinstance(state, dict):
+        return state, None
+    spec = None
+    for key in AUDIO_KEYS:
+        if key in state:
+            spec = state[key]
+            break
+    if spec is None:
+        return state, None
+    text = state.get("text")
+    # Everything except the sound key and the text companion is still state the model should see,
+    # so it is not dropped: {"audio": ..., "vendor": "acme"} keeps "vendor" as data.
+    rest = {k: v for k, v in state.items() if k not in AUDIO_KEYS and k != "text"}
+    if text is None:
+        return (rest if rest else ""), spec
+    if rest:
+        merged = dict(rest)
+        merged["text"] = text
+        return merged, spec
+    return text, spec
+
+
+def collate_audio(items, embed_fn, pad_id: int = 0):
+    """Collate already-encoded items that carry an audio block into one batch.
+
+    The same operation as `laya.vision.collate_visual` on a different key, through the shared
+    `laya.block.collate_block`, so a mixed batch -- ``[{"audio_path": p}, {"text": "hello"}]`` --
+    pads, splices and masks the same way a vision batch does.
+    """
+    from .block import collate_block
+    return collate_block(items, embed_fn, block_key="audio", label="audio", pad_id=pad_id)
 
 
 # ------------------------------------------------------------------------------------------------

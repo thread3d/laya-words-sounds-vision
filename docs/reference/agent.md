@@ -43,6 +43,29 @@ A text checkpoint is unaffected by all of this: with no `vision` block in its co
 serialized as it always was, byte for byte, so an image reference in the state becomes text it was
 never trained to read rather than a silent shape change.
 
+## States that carry a sound
+
+A state can be a recording, and a checkpoint trained with `--audio` reads it:
+
+```python
+agent = laya.load("./my-audio-checkpoint")
+answer = agent.predict({"audio_path": "clip.wav", "text": "is this a dog barking?"}, question)
+```
+
+`audio_path`, `audio` (WAV/FLAC/Ogg/MP3 bytes or base64), `audio_base64` and `audio_waveform`
+(already-decoded samples) are the accepted forms; `laya.audio.split_state` is the reference. The
+decode is where the transport limits are enforced — a recording over the byte cap, over the
+duration cap, or one whose container does not state a duration (MP3 excepted) is refused before any
+decoder runs.
+
+A state may carry a picture or a sound, **not both**. One batch is one forward pass with one
+spliced block per row, so a single batch cannot mix picture rows and sound rows either; both cases
+are refused by name rather than scored without one of the two inputs.
+
+The rules above for images hold for sounds too: a mixed sound-and-text `predict_batch` is legal, the
+recording is encoded once per distinct waveform per call (`laya.audio.AudioCache`), and `fast=True`
+and `compile=` refuse rather than mis-answer.
+
 To export a vision checkpoint, `scripts/export_onnx.py` writes two graphs — the tower, then the
 decision model over `inputs_embeds` — and `laya-evals onnx` checks them against the eager path.
 

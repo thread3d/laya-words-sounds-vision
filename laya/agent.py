@@ -8,7 +8,7 @@ import time
 import warnings
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -54,10 +54,14 @@ from .common import (
     window_budget,
 )
 from .confidence import apply_confidence_gate, check_min_confidence
-from .calibrate import MODALITY_IMAGE, MODALITY_TEXT
+from .calibrate import MODALITY_AUDIO, MODALITY_IMAGE, MODALITY_TEXT
 from .vision import (VisualCache, build_vision_encoder, collate_visual, load_pixels,
                      load_vision_weights, local_tower_dir, parse_vision, split_state,
                      visual_plan)
+from .audio import (AudioCache, audio_plan, build_audio_encoder, collate_audio,
+                    load_audio_weights, load_waveform, parse_audio)
+from .audio import local_tower_dir as local_audio_tower_dir
+from .audio import split_state as split_audio_state
 from .hooks import (
     HookRegistry, PredictContext, _as_sequence, aggregate_usage, compose_hooks, dispatch,
     normalise_hooks, validate_timeout,
@@ -475,11 +479,11 @@ def _check_scan_budget(agent, evidence, sized, cfg_max_len, cfg_head_max_len, as
         return                                 # malformed questions are the validator's to report
     if not internal:
         return
-    # The same visual-budget subtraction `predict_long` makes: the scan was sized against
-    # `max_len - n_visual_tokens`, so the room has to be measured against the same number or this
-    # check would pass a scan that no longer fits.
-    vision_tokens = agent.vision.n_visual_tokens if getattr(agent, "vision", None) is not None else 0
-    room = min(state_room(agent.tok, q, eff_max_len - vision_tokens, eff_head) for q in internal)
+    # The same block-budget subtraction `predict_long` makes: the scan was sized against
+    # `max_len - n_*_tokens`, so the room has to be measured against the same number or this check
+    # would pass a scan that no longer fits.
+    block_tokens = agent._block_tokens()
+    room = min(state_room(agent.tok, q, eff_max_len - block_tokens, eff_head) for q in internal)
     if room >= sized:
         return
     raise ValueError(
@@ -765,6 +769,20 @@ class Agent(HookRegistry):
             raise ValueError(
                 "a vision checkpoint cannot use fast=True: the TileLang path is built for the "
                 "five-input input_ids forward and has no visual-token path yet")
+
+        # Sounds, exactly as vision: a config with no "audio" block parses to None and none of the
+        # branches below runs. A checkpoint may declare both blocks; a single state may not carry
+        # both a picture and a sound (see `_encode_state`).
+        self.audio = parse_audio(
+            self.cfg,
+            max_position_embeddings=getattr(self.model.encoder.config, "max_position_embeddings", None))
+        self.audio_encoder = None
+        self._audio_cache = AudioCache(self.cfg.get("audio", {}).get("cache_size", 64)) \
+            if self.audio is not None else None
+        if self.audio is not None and fast:
+            raise ValueError(
+                "an audio checkpoint cannot use fast=True: the TileLang path is built for the "
+                "five-input input_ids forward and has no audio-token path yet")
 
         # ModernBERT's reference_compile defaults to "auto" and will torch.compile the encoder.
         # That is a loss for the batch sizes Laya runs (a handful of questions per call) and can
@@ -1296,6 +1314,102 @@ class Agent(HookRegistry):
             or getattr(getattr(enc, "embeddings", None), "word_embeddings", None)
         return table.weight.dtype if table is not None else self.dtype
 
+    def _audio_block(self, audio_spec, summary: bool = False):
+        """Encode one recording into the audio block, memoised by the hash of its samples.
+
+        The tower pass is the expensive half of a decision about a sound, and a call that asks
+        several questions about one recording must not pay it several times. `summary` appends the
+        block's summary row, which `audio_plan` asked for from this head's own option count, and it
+        is part of the cache key because it changes the block's width.
+        """
+        if self.audio is None:                                    # pragma: no cover - guarded
+            raise ValueError("this checkpoint has no sound support")
+        if self.audio_encoder is None:
+            self.audio_encoder = build_audio_encoder(
+                self.audio,
+                hidden_size=self.model.encoder.config.hidden_size,
+                dtype=self.dtype if self.device.type != "cuda" else None,
+                # A bundled tower wins over the Hub id: it is what makes an offline deployment work.
+                tower_dir=local_audio_tower_dir(getattr(self, "model_dir", None)))
+            # The projector's trained weights are the one part of an audio checkpoint that is not in
+            # `model.safetensors`, so a checkpoint that declares audio and ships none is refused
+            # here rather than answering from noise.
+            load_audio_weights(self.audio_encoder, getattr(self, "model_dir", "") or ".",
+                               dtype=self.dtype if self.device.type != "cuda" else None)
+            self.audio_encoder.to(self.device)
+            self.audio_encoder.eval()
+        waveform = load_waveform(audio_spec, self.audio.sample_rate)
+        encoder = self.audio_encoder
+
+        def encode(samples):
+            with torch.no_grad():
+                return encoder.encode(samples.unsqueeze(0).to(self.device), summary=summary)[0]
+
+        block = self._audio_cache.get_or_encode(waveform, encode, summary=summary)
+        # Match the token embedding table: the splice concatenates the two, and a bf16 checkpoint
+        # against an fp32 projector would raise inside torch.cat.
+        return block.to(self.device, dtype=self._embed_dtype())
+
+    def _block_budget(self) -> Tuple[int, str, str]:
+        """The tokens this checkpoint reserves for a spliced block: ``(tokens, noun, name)``.
+
+        One block per state, so the two modalities cannot both spend the budget: a checkpoint that
+        declares vision and audio reserves the larger of the two widths, and the name that comes
+        back is the one whose width it is -- so an error about the budget names the knob that would
+        actually change it.
+        """
+        best = (0, "visual", "vision")
+        if getattr(self, "vision", None) is not None:
+            best = (self.vision.n_visual_tokens, "visual", "vision")
+        if getattr(self, "audio", None) is not None and \
+                self.audio.n_audio_tokens >= best[0]:
+            best = (self.audio.n_audio_tokens, "audio", "audio")
+        return best
+
+    def _block_tokens(self) -> int:
+        """How many tokens this checkpoint reserves for a spliced block in one row."""
+        return self._block_budget()[0]
+
+    @staticmethod
+    def _modality_for(image_spec, audio_spec) -> str:
+        """The temperature channel a row is scored in."""
+        if image_spec is not None:
+            return MODALITY_IMAGE
+        if audio_spec is not None:
+            return MODALITY_AUDIO
+        return MODALITY_TEXT
+
+    def _attach_block(self, item: Dict, q: Dict, seq: List[int], markers: List[int],
+                      head_max_len: int, max_len: int, image_spec, audio_spec,
+                      only_option: Optional[int] = None) -> Dict:
+        """Attach the spliced non-text block and its plan to one encoded row.
+
+        Both layouts (the joint head and one row per option) and both modalities come through here,
+        so the block is sized from one head and spliced at one place whichever path built the
+        sequence. Nothing is attached when the state carried neither a picture nor a sound, which is
+        what keeps a text checkpoint's rows untouched (spec C6).
+        """
+        if image_spec is None and audio_spec is None:
+            return item
+        head_ids, _, _ = build_head(self.tok, q, head_max_len, option_order=q.get("option_order"),
+                                    only_option=only_option)
+        option_tokens = (len(head_ids) - markers[0]) if markers else 0
+        max_positions = self.model.encoder.config.max_position_embeddings
+        if image_spec is not None:
+            cfg = self.vision
+            item["visual"] = self._visual_block(image_spec, cfg.summary_wanted(option_tokens))
+            item["plan"] = visual_plan(
+                cfg, text_len=len(seq), markers=markers, head_len=len(head_ids), max_len=max_len,
+                max_position_embeddings=max_positions, option_tokens=option_tokens)
+        else:
+            cfg = self.audio
+            item["audio"] = self._audio_block(audio_spec, cfg.summary_wanted(option_tokens))
+            item["plan"] = audio_plan(
+                cfg, text_len=len(seq), markers=markers, head_len=len(head_ids), max_len=max_len,
+                max_position_embeddings=max_positions, option_tokens=option_tokens)
+        item["markers"] = item["plan"].marker_positions
+        return item
+
     def _encode_state(self, state: Union[str, dict, list], ids: List[str], internal: Dict[str, Dict],
                       max_len: Optional[int] = None, head_max_len: Optional[int] = None) -> List[Dict]:
         """Tokenize one state against every (already validated + normalized) question.
@@ -1305,21 +1419,35 @@ class Agent(HookRegistry):
         """
         max_len = self.cfg.get("max_len", 512) if max_len is None else max_len
         head_max_len = self.cfg.get("head_max_len", 192) if head_max_len is None else head_max_len
-        # Vision: a state may carry an image. Only when this checkpoint has vision support, so a
-        # text checkpoint never has a state reshaped underneath it (spec C6).
-        visual = None
+        # A state may carry a picture or a sound. Only when this checkpoint has support for it, so
+        # a text checkpoint never has a state reshaped underneath it (spec C6).
         image_spec = None
-        text_len_budget = max_len
-        vision_cfg = getattr(self, "vision", None)
-        if vision_cfg is not None:
+        audio_spec = None
+        if getattr(self, "vision", None) is not None:
             state, image_spec = split_state(state)
-            if image_spec is not None:
-                text_len_budget = max_len - vision_cfg.n_visual_tokens
-                if text_len_budget < 16:
-                    raise ValueError(
-                        "vision: %d visual tokens leave %d for the text sequence in max_len=%d; "
-                        "lower vision.n_visual_tokens or raise max_len"
-                        % (vision_cfg.n_visual_tokens, text_len_budget, max_len))
+        if getattr(self, "audio", None) is not None:
+            state, audio_spec = split_audio_state(state)
+        if image_spec is not None and audio_spec is not None:
+            raise ValueError(
+                "a state may carry a picture or a sound, not both: this one has both. Send them "
+                "as two requests, or put the one the decision is about in the state and the other "
+                "in the text. (A picture and a sound in one sequence would need two blocks spliced "
+                "into one head, which this checkpoint's layout does not have.)")
+        text_len_budget = max_len
+        block_tokens = 0
+        if image_spec is not None:
+            block_tokens = self.vision.n_visual_tokens
+        elif audio_spec is not None:
+            block_tokens = self.audio.n_audio_tokens
+        if block_tokens:
+            text_len_budget = max_len - block_tokens
+            if text_len_budget < 16:
+                name = "vision" if image_spec is not None else "audio"
+                noun = "visual" if image_spec is not None else "audio"
+                raise ValueError(
+                    "%s: %d %s tokens leave %d for the text sequence in max_len=%d; "
+                    "lower %s.n_%s_tokens or raise max_len"
+                    % (name, block_tokens, noun, text_len_budget, max_len, name, noun))
         # A chronological conversation list is serialized newest-last, so the default
         # right-truncation (st[:room]) would silently drop the newest turn. Truncate
         # from the left for lists so the most recent intent is preserved.
@@ -1352,26 +1480,13 @@ class Agent(HookRegistry):
                     item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]],
                             "options": stats, "state_stats": state_stats,
                             "option_group": (qid, slot),
-                            "modality": MODALITY_IMAGE if image_spec is not None else MODALITY_TEXT}
-                    if image_spec is not None:
-                        head_ids, _, _ = build_head(self.tok, q, head_max_len,
-                                                    option_order=q.get("option_order"),
-                                                    only_option=slot)
-                        option_tokens = (len(head_ids) - markers[0]) if markers else 0
-                        # The block and the plan are sized from the same number: the projector
-                        # emits `n_visual_tokens`, plus the [VIS_SUMMARY] row when this head's
-                        # options cross the configured threshold (spec 4.1).
-                        visual = self._visual_block(
-                            image_spec, vision_cfg.summary_wanted(option_tokens))
-                        plan = visual_plan(
-                            vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
-                            max_len=max_len,
-                            max_position_embeddings=self.model.encoder.config.max_position_embeddings,
-                            option_tokens=option_tokens)
-                        item["visual"] = visual
-                        item["plan"] = plan
-                        item["markers"] = plan.marker_positions
-                    items.append(item)
+                            "modality": self._modality_for(image_spec, audio_spec)}
+                    # The block and the plan are sized from the same number: the projector emits
+                    # `n_*_tokens`, plus the summary row when this head's options cross the
+                    # configured threshold (spec 4.1).
+                    items.append(self._attach_block(
+                        item, q, seq, markers, head_max_len, max_len, image_spec, audio_spec,
+                        only_option=slot))
                 continue
             seq, markers, stats, state_stats, *layout = build_sequence(
                 self.tok, state, q, text_len_budget, head_max_len,
@@ -1397,20 +1512,9 @@ class Agent(HookRegistry):
                     % (qid, len(markers), n_opts, max_len, head_max_len))
             item = {"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]], "options": stats,
                     "state_stats": state_stats,
-                    "modality": MODALITY_IMAGE if image_spec is not None else MODALITY_TEXT}
-            if image_spec is not None:
-                head_ids, _, _ = build_head(self.tok, q, head_max_len,
-                                            option_order=q.get("option_order"))
-                option_tokens = (len(head_ids) - markers[0]) if markers else 0
-                visual = self._visual_block(image_spec, vision_cfg.summary_wanted(option_tokens))
-                plan = visual_plan(
-                    vision_cfg, text_len=len(seq), markers=markers, head_len=len(head_ids),
-                    max_len=max_len,
-                    max_position_embeddings=self.model.encoder.config.max_position_embeddings,
-                    option_tokens=option_tokens)
-                item["visual"] = visual
-                item["plan"] = plan
-                item["markers"] = plan.marker_positions
+                    "modality": self._modality_for(image_spec, audio_spec)}
+            item = self._attach_block(item, q, seq, markers, head_max_len, max_len, image_spec,
+                                      audio_spec)
             if layout:
                 item["layout"] = layout[0]
             items.append(item)
@@ -1817,10 +1921,25 @@ class Agent(HookRegistry):
                                 indices = order[offset:offset + chunk]
                                 per_state_items = [encoded[i] for i in indices]
 
-                                if any("visual" in it for item in per_state_items for it in item):
-                                    b = collate_visual(
-                                        [it for item in per_state_items for it in item],
-                                        self._token_embeddings, self.tok.pad_token_id)
+                                flat = [it for item in per_state_items for it in item]
+                                carries_visual = any("visual" in it for it in flat)
+                                carries_audio = any("audio" in it for it in flat)
+                                if carries_visual and carries_audio:
+                                    # One batch is one sequence; splicing two different blocks into
+                                    # it would need a layout this checkpoint does not have. Refuse
+                                    # by name rather than let one modality's rows be scored without
+                                    # their input.
+                                    raise ValueError(
+                                        "this batch mixes a state that carries a picture with one "
+                                        "that carries a sound. One batch is one forward pass with "
+                                        "one spliced block per row; send the two states in separate "
+                                        "calls, or split the batch by modality")
+                                if carries_visual:
+                                    b = collate_visual(flat, self._token_embeddings,
+                                                       self.tok.pad_token_id)
+                                elif carries_audio:
+                                    b = collate_audio(flat, self._token_embeddings,
+                                                      self.tok.pad_token_id)
                                 else:
                                     b = collate_items(per_state_items, self.tok.pad_token_id)
                                 logits, act = self._forward(b)
@@ -2017,19 +2136,19 @@ class Agent(HookRegistry):
         for qid in ids:
             self._check_question(qid, questions[qid])
         internal = {qid: self._to_internal(questions[qid]) for qid in ids}
-        # A vision checkpoint spends part of `max_len` on the visual block, so the room a window
+        # A vision or audio checkpoint spends part of `max_len` on its block, so the room a window
         # has is smaller than the text arithmetic says. Sizing against `max_len` here would make
-        # every window `n_visual_tokens` wider than the sequence that scores it: `build_sequence`
-        # would re-truncate on the way in, the tail of every window would reach no model, and the
-        # reported span would claim it did -- the exact failure `window_budget`'s own docstring
-        # describes for an over-wide window.
-        vision_tokens = self.vision.n_visual_tokens if getattr(self, "vision", None) is not None else 0
-        window_max_len = max_len - vision_tokens
-        if vision_tokens and window_max_len < 64:
+        # every window `n_*_tokens` wider than the sequence that scores it: `build_sequence` would
+        # re-truncate on the way in, the tail of every window would reach no model, and the reported
+        # span would claim it did -- the exact failure `window_budget`'s own docstring describes for
+        # an over-wide window.
+        block_tokens, noun, name = self._block_budget()
+        window_max_len = max_len - block_tokens
+        if block_tokens and window_max_len < 64:
             raise ValueError(
-                "predict_long: %d visual tokens leave %d of max_len=%d for a text window; raise "
-                "max_len or lower vision.n_visual_tokens before scanning a long state"
-                % (vision_tokens, window_max_len, max_len))
+                "predict_long: %d %s tokens leave %d of max_len=%d for a text window; raise "
+                "max_len or lower %s.n_%s_tokens before scanning a long state"
+                % (block_tokens, noun, window_max_len, max_len, name, noun))
         budget, step, room = window_budget(self.tok, [internal[qid] for qid in ids], window_max_len,
                                            head_max_len, window=window, stride=stride)
         # Snapshot the questions the scan was just sized against, BEFORE any start hook can

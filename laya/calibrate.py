@@ -199,9 +199,10 @@ def fit_one_temperature(pairs: Sequence, min_n: Optional[int] = None) -> float:
     return clamp_temperature(_fit_unclamped_temperature(pairs, min_n), TEMP_MIN, TEMP_MAX)
 
 
-MODALITIES = ("text", "image")
+MODALITIES = ("text", "image", "audio")
 MODALITY_TEXT = MODALITIES[0]
 MODALITY_IMAGE = MODALITIES[1]
+MODALITY_AUDIO = MODALITIES[2]
 
 
 def _modality(value) -> str:

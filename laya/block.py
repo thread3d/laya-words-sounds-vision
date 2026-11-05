@@ -160,6 +160,105 @@ def _cat(tok_embeds, block_embeds, splice: int):
     return torch.cat([tok_embeds[:, :splice], block_embeds, tok_embeds[:, splice:]], dim=1)
 
 
+def collate_block(items, embed_fn, block_key: str, label: str = "block", pad_id: int = 0):
+    """Collate already-encoded items that carry a non-text block into one batch.
+
+    `items` is the flat list of question rows (every state's rows, in order). A row that carries an
+    input has ``ids`` (its text sequence), ``markers`` (already placed by the modality's plan),
+    ``<block_key>`` (``[n_block, D]``) and ``plan``; a row that does not has only ``ids`` and
+    ``markers``.
+
+    A mixed list is legitimate and is what `Agent.predict_batch` produces from
+    ``[{"image_path": p}, {"text": "hello"}]``: one batch is one forward pass, and each row is its
+    own sequence, so a row without an input is simply a text row spliced into nothing. This used
+    to raise `KeyError: 'visual'` on the first text row, which also made a *batched* gate-1
+    ablation -- the input-removed half of `laya-evals ablate` -- impossible by construction.
+
+    The block is the same width on every row that has one, so right-padding the *text* means a
+    row's splice point is its own and nothing needs shifting; the padded batch is therefore
+    ``max(len(ids)) + n_block`` wide, and the trailing pad of a short row lands after its text.
+
+    `visual_mask` in the output is this batch's "these positions are the input, not the words"
+    tensor. It carries the vision path's name because `DecisionModel.forward` asks it by that name,
+    and both modalities fill it identically.
+
+    Returns the keys `DecisionModel.forward` needs, with `inputs_embeds` in place of `input_ids`.
+    """
+    import torch
+
+    block_rows = [it for it in items if block_key in it]
+    n_block = max((it["plan"].n_block for it in block_rows), default=0)
+    width = max(len(it["ids"]) for it in items) + n_block
+    k_max = max(len(it["markers"]) for it in items)
+    hidden = block_rows[0][block_key].size(-1) if block_rows else None
+    if hidden is None:
+        raise ValueError("collate_%s needs at least one row carrying a %s block; use "
+                         "`collate_items` for a batch that is entirely text" % (label, label))
+    # The block is spliced from the same device it arrived on: a trained projector emits on its own
+    # device (a GPU), while `embed_fn` is a CPU lookup because batches are built here, on the CPU.
+    # Allocating the batch where the block already is makes `torch.cat` legal without a per-row
+    # round trip, and `_forward`'s `.to(device)` stays a no-op for it.
+    device = block_rows[0][block_key].device
+
+    embeds = torch.zeros(len(items), width, hidden, device=device)
+    att = torch.zeros(len(items), width, dtype=torch.long, device=device)
+    pos = torch.zeros(len(items), width, dtype=torch.long, device=device)
+    mpos = torch.zeros(len(items), k_max, dtype=torch.long, device=device)
+    mmask = torch.zeros(len(items), k_max, dtype=torch.bool, device=device)
+    # Which positions hold the block, for a checkpoint with an attention readout. The readout asks
+    # "which tokens are the input", and nothing else in the batch says.
+    block_mask = torch.zeros(len(items), width, dtype=torch.bool, device=device)
+    # Training batches carry a target; inference batches do not. Mirrors `collate_items`, including
+    # its refusal of a target longer than the row's own marker count.
+    has_target = any("target" in it for it in items)
+    target = torch.zeros(len(items), k_max, dtype=torch.float32, device=device) if has_target else None
+
+    for i, it in enumerate(items):
+        ids = it["ids"]
+        tok = embed_fn(torch.tensor(ids, dtype=torch.long)).to(device)
+        if block_key in it:
+            row = splice_embeddings(tok.unsqueeze(0), it[block_key].unsqueeze(0), it["plan"],
+                                    label=label)[0]
+            positions = list(it["plan"].position_ids)
+            splice, own_n = it["plan"].splice, it["plan"].n_block
+        else:
+            # A text row in a block batch: nothing is spliced, and its positions are the plain
+            # 0..L-1 a text-only batch would get -- the padded batch keeps each row's numbering
+            # to itself, so a neighbour's block cannot shift this row's RoPE distances.
+            row = tok
+            positions = list(range(len(ids)))
+            splice, own_n = 0, 0
+        n = row.size(0)
+        embeds[i, :n] = row
+        att[i, :n] = 1
+        pos[i, :n] = torch.tensor(positions, dtype=torch.long, device=device)
+        if own_n:
+            block_mask[i, splice:splice + own_n] = True
+        k = len(it["markers"])
+        mpos[i, :k] = torch.tensor(it["markers"], dtype=torch.long, device=device)
+        mmask[i, :k] = True
+        if has_target and "target" in it:
+            t = it["target"]
+            if len(t) > k:
+                raise ValueError(
+                    "collate_%s: item %d has %d target entries but only %d marker positions; "
+                    "a target needs one entry per option" % (label, i, len(t), k))
+            target[i, :len(t)] = torch.tensor([float(v) for v in t], dtype=torch.float32,
+                                              device=device)
+    out = {
+        "inputs_embeds": embeds,
+        "attention_mask": att,
+        "position_ids": pos,
+        "marker_pos": mpos,
+        "marker_mask": mmask,
+        "qtype": torch.tensor([it["qtype"] for it in items], dtype=torch.long, device=device),
+        "visual_mask": block_mask,
+    }
+    if target is not None:
+        out["target"] = target
+    return out
+
+
 def describe_plan(plan: BlockPlan, noun: str = "block") -> Tuple[str, ...]:
     """Human-readable facts about a plan, for error messages and `--dry-run` style output."""
     return ("splice at token %d" % plan.splice,

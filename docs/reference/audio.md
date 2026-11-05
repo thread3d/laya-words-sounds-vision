@@ -68,9 +68,27 @@ the weights, and a checkpoint that declares audio without it is refused rather t
 ## A sound inside a state
 
 A state carries a sound the way it carries a picture: a reference the caller names, or samples the
-caller already decoded. Decoding is optional — `pip install laya[audio]` adds `soundfile` for a
-compressed container, PCM WAV goes through the standard library either way, and
-`{"waveform": <tensor>}` skips both.
+caller already decoded.
+
+```python
+answer = agent.predict({"audio_path": "clip.wav", "text": "is this a dog barking?"}, question)
+answer = agent.predict({"audio": {"waveform": samples}, "text": "how urgent is this?"}, question)
+```
+
+`audio`, `audio_path`, `audio_base64` and `audio_waveform` are the accepted keys; a state may also
+be a recording on its own, with no text. A state may carry a picture **or** a sound, not both — the
+engine refuses that state by name, because one sequence carries one spliced block.
+
+Decoding is optional: `pip install laya[audio]` adds `soundfile` for a compressed container, PCM WAV
+goes through the standard library either way, and `{"waveform": <tensor>}` skips both.
+
+::: laya.audio.AUDIO_KEYS
+
+::: laya.audio.has_audio
+
+::: laya.audio.split_state
+
+::: laya.audio.collate_audio
 
 ::: laya.audio.load_waveform
 

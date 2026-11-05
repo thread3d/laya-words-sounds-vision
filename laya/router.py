@@ -46,6 +46,7 @@ from .hooks import (
 )
 from .hooks import _SKIP_DEFAULTS
 from .vision import has_image
+from .audio import has_audio
 from .lang import analyse
 
 # The hub repo bundles all three checkpoints; only the requested subfolder is downloaded.
@@ -718,6 +719,7 @@ class Router(HookRegistry):
         preload: bool = False,
         lang_guess: Optional[Any] = None,
         vision_model: Optional[str] = "vision",
+        audio_model: Optional[str] = "audio",
         hooks=None,
         on_predict_start=None,
         on_predict_end=None,
@@ -733,6 +735,11 @@ class Router(HookRegistry):
         # exists in `self.models`, so a Router with none behaves exactly as before. `None` turns
         # the rule off entirely, for a deployment that wants images to route by text alone.
         self.vision_model = vision_model
+        # The name a sound checkpoint is registered under, and the same opt-in shape as vision: the
+        # rule fires only once such a checkpoint exists in `self.models`, so a Router with none
+        # behaves exactly as before, and `None` turns it off for a deployment that wants sounds to
+        # route by their accompanying text.
+        self.audio_model = audio_model
         self.hooks_raise = bool(hooks_raise)
         self.hooks_concurrent = bool(hooks_concurrent)
         self.hooks_timeout = None if hooks_timeout is None else validate_timeout(hooks_timeout)
@@ -1262,8 +1269,8 @@ class Router(HookRegistry):
         """Decide which checkpoint to use, without loading or running anything.
 
         Precedence: explicit `model` > explicit `task` > a state carrying an image (when a vision
-        checkpoint is registered) > detected workflow (opt-in) > explicit `lang` > `lang_guess` >
-        detected script/language > default.
+        checkpoint is registered) > a state carrying a sound (when an audio one is) > detected
+        workflow (opt-in) > explicit `lang` > `lang_guess` > detected script/language > default.
 
         The image rule is new and narrow: it fires only when `self.vision_model` names a checkpoint
         in `self.models`, so a Router that has none routes exactly as it always did.
@@ -1306,6 +1313,17 @@ class Router(HookRegistry):
             if key in self.models:
                 return RouteDecision(model=key, repo=_repo_str(self.models[key]),
                                      reason="state carries an image", detection=None,
+                                     workflow=None)
+
+        # The same rule for a sound. It sits after the image rule because a state that carries both
+        # is out of scope (the engine refuses it at the model), and above the language rules for
+        # the same reason an image is: a text checkpoint cannot hear a recording, whatever language
+        # the text beside it is in.
+        if self.audio_model is not None and has_audio(state):
+            key = canonical_name(self.audio_model)
+            if key in self.models:
+                return RouteDecision(model=key, repo=_repo_str(self.models[key]),
+                                     reason="state carries a sound", detection=None,
                                      workflow=None)
 
         workflow = match_typed_decisions_workflow(questions or {})
