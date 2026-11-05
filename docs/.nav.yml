@@ -2,6 +2,7 @@
 # guide shows up without an edit here; add it where it belongs once its place is clear.
 nav:
   - index.md
+  - upgrading.md
   - Guides:
       - use-cases.md
       - structured.md

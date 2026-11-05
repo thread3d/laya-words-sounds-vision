@@ -1,7 +1,7 @@
 # Sounds — the audio decision system
 
 Laya answers typed questions about a **state**. A state is words. It may also be a picture, and
-since 1.1.2 a sound: a recording is an input the answer can depend on, exactly as a photograph is. This page is the written-down contract for the sound path — what a recording becomes,
+since 2.0 a sound: a recording is an input the answer can depend on, exactly as a photograph is. This page is the written-down contract for the sound path — what a recording becomes,
 where it goes in the sequence, what is enforced before a decoder runs, and what has and has not been
 measured.
 

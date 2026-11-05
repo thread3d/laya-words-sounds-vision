@@ -126,12 +126,20 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 
 ## Documentation
 
-**[The documentation](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs)**: guides for [prediction hooks](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/hooks/index.md), [schema-driven decisions](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/structured.md), [Docker](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/docker.md) and [LangChain and LangGraph](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/langchain.md), plus a full [API reference](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/reference/index.md). `zensical build --strict` renders the same pages from `docs/`.
+**[The documentation](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs)**: guides for [prediction hooks](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/hooks/index.md), [schema-driven decisions](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/structured.md), [Docker](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/docker.md) and [LangChain and LangGraph](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/langchain.md), plus a full [API reference](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/reference/index.md) and [Upgrading to 2.0](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/upgrading.md). `zensical build --strict` renders the same pages from `docs/`. Release history is in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
 
-## What's new in 1.1: sounds
+## What's new in 2.0.0
 
 Words, sounds or vision. A state may now carry a **recording** as well as text or a picture, and a
 checkpoint trained with `--audio` answers from it.
+
+The Python API is additive: a text checkpoint and a vision checkpoint are byte-identical after this
+release and no call site has to change. The major version marks the contract change — a state has
+three modalities, a checkpoint config may carry an `"audio"` block, and `MODALITIES` has a third
+tag — plus the internal reorganisation that lets one layout serve both media. Every name that moved
+is listed in [Upgrading to 2.0](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/upgrading.md),
+and [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md) has
+the full entry.
 
 * **The audio path reuses the vision path's machinery, deliberately.** `laya.block` owns where a
   block goes and how it is spliced, `laya.projector.PooledProjector` is the projector both train,
@@ -153,6 +161,9 @@ checkpoint trained with `--audio` answers from it.
 * **Nothing about the accuracy is claimed.** There is no labelled audio benchmark in this repository
   yet, so the docs state the layout and the gates and quote no number. The vision figures above come
   from a harness in `research/benchmarks/`; the audio equivalent is the next step.
+* **The design is written down.** [The sound decision system](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-decision-system.md)
+  holds the contract, the layout, the tower knobs, the training data contract, the limits by layer,
+  the non-goals and an explicit list of what is measured and what is not.
 
 ## What's new in 1.0.0
 
