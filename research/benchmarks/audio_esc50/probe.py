@@ -34,10 +34,12 @@ sys.path.insert(0, REPO)
 
 DATA_ROOT = os.environ.get("AUDIO_BENCH_DATA", os.path.join(REPO, ".audio-bench"))
 ROWS = os.path.join(DATA_ROOT, "esc50")
-FRAMES = os.path.join(ROWS, "frames")
 
 TOWER = os.environ.get("AUDIO_BENCH_TOWER", "facebook/wav2vec2-base")
 SAMPLE_RATE = 16000
+# Frames are cached per *tower*: the cache key was the clip name alone, so a second tower silently
+# scored the first tower's features. One directory per tower makes a comparison run honest.
+FRAMES = os.path.join(ROWS, "frames", TOWER.replace("/", "__"))
 
 
 def _encoder():

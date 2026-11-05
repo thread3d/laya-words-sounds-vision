@@ -71,7 +71,41 @@ Two facts fall out of that table, and they set the bar for the engine:
   (AST 95.6 %, BEATs 98.1 %), which is the comparison the assessment page argues is not
   like-for-like.
 
-## 2. Where that sits against the field
+## 2. The tower matters more than the head
+
+Same rows, same probe, three frozen towers. `AUDIO_BENCH_TOWER=<hf id> python3 .../probe.py`:
+
+| tower | parameters | ESC-50 ridge (mean) | ESC-10 ridge (mean+std) |
+|---|---|---|---|
+| `facebook/wav2vec2-base` (self-supervised, **the shipped default**) | 94 M | 0.5265 ± 0.0368 | 0.7300 ± 0.0292 |
+| `facebook/wav2vec2-base-960h` (the same network, ASR-finetuned) | 94 M | 0.3805 ± 0.0184 | — |
+| `facebook/wav2vec2-large-960h-lv60-self` (ASR, large) | 317 M | **0.6280 ± 0.0157** | — |
+
+Same three towers on the two datasets make the rule sharper — and FSDD is where ASR training wins,
+because what is being decided *is* speech:
+
+| tower | FSDD ridge (mean) | FSDD centroid |
+|---|---|---|
+| `wav2vec2-base` (self-supervised, shipped default) | 0.7950 | 0.5330 |
+| `wav2vec2-large-960h-lv60-self` (ASR, large) | **0.9750** | 0.7960 |
+
+Two findings, both worth acting on:
+
+* **ASR fine-tuning costs 15 points on environmental audio.** The 960h-supervised version of the very
+  same network probes at 0.3805 against 0.5265 for the self-supervised one: ASR training pulls the
+  representation toward phonetics and away from the general acoustics a sound decision needs. The
+  shipped default is the self-supervised checkpoint for that reason, and this is the measurement
+  behind the choice.
+* **Match the tower to what is being decided.** Environmental sound prefers the
+  self-supervised checkpoint (0.5265 against 0.3805 for its ASR sibling); spoken digits prefer the
+  ASR one, by a wide margin (0.9750 against 0.7950) — and 0.9750 is inside the range published
+  fine-tuned digit classifiers report. A "sound" decision is not one tower's job.
+* **Size is worth more than the head.** `wav2vec2-large` at 0.6280 is ten points above `base` and
+  above every frozen-probe number in the published table below (Whisper 52.8, Dasheng 54.8) — with
+  the same 768-number feature and the same closed-form head. A frozen tower is a choice, and this
+  table is how to make it.
+
+## 3. Where that sits against the field
 
 | system | ESC-50 | protocol |
 |---|---|---|
@@ -92,7 +126,7 @@ The Laya row here is the *tower's* feature quality, not the engine's answer — 
 engine's number can be read as "better or worse than a linear probe on the same features", which is
 the only comparison that isolates what the decision head adds.
 
-## 3. The engine arms
+## 4. The engine arms
 
 `run_engine_arms.sh` trains two Laya checkpoints through `laya-train --audio` on the same rows and
 scores each with `eval_gate.py`:

@@ -76,6 +76,12 @@ Two lessons from that table, both of which shape the harness:
    frozen — belongs in the second family, which is why its measured probe is compared to *those*
    rows and not to AST.
 
+The harness then measured three towers on the same rows, which is the comparison that tells a user
+what to run: on ESC-50 the self-supervised `wav2vec2-base` probes at 0.5265 against **0.3805** for its
+ASR-finetuned sibling, while `wav2vec2-large` reaches **0.6280**; on spoken digits the ASR large model
+reaches **0.9750** against 0.7950. The tower has to match what is being decided — see
+[the results](audio-benchmark-results.md#2-the-tower-matters-more-than-the-head).
+
 Human accuracy (81.3 %) sits in the same band as those frozen probes. That is the honest context
 for any number this engine produces: beating a linear probe on the same features is the claim worth
 making; matching a fine-tuned AudioSet model is not a claim a frozen tower can support.

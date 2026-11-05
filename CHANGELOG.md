@@ -6,6 +6,33 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.6] - 2026-11-05
+
+Which frozen tower to run — measured, not assumed.
+
+### Added
+
+- A tower comparison through the same probe on the same rows (`AUDIO_BENCH_TOWER=<hf id>`), with the
+  frame cache now keyed **per tower**: it was keyed on the clip name alone, so a second tower would
+  silently have scored the first tower's features.
+
+| tower | ESC-50 ridge | FSDD ridge |
+|---|---|---|
+| `facebook/wav2vec2-base` (self-supervised, the shipped default) | **0.5265 ± 0.0368** | 0.7950 |
+| `facebook/wav2vec2-base-960h` (same net, ASR-finetuned) | 0.3805 ± 0.0184 | — |
+| `facebook/wav2vec2-large-960h-lv60-self` (ASR, large) | **0.6280 ± 0.0157** | **0.9750** |
+
+### Findings
+
+- **ASR fine-tuning costs 15 points on environmental audio** (0.5265 → 0.3805): supervision pulls the
+  representation toward phonetics and away from general acoustics. The shipped default is the
+  self-supervised checkpoint, and this is the measurement behind it.
+- **The tower must match what is being decided.** On spoken digits the ASR large model reaches
+  **0.9750** against 0.7950 for the self-supervised base — inside the range fine-tuned digit
+  classifiers report, from a frozen encoder and a closed-form head.
+- **Size beats head.** `wav2vec2-large` at 0.6280 on ESC-50 is ten points above `base` and above
+  every published frozen-probe row in the assessment's table (Whisper 52.8, Dasheng 54.8).
+
 ## [2.1.5] - 2026-11-05
 
 Both gates, on a model that is learning — and the price of the second one on this hardware.
