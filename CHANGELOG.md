@@ -6,6 +6,21 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.3] - 2026-11-05
+
+The high-cardinality control, and the 50-way arm reported as it ran.
+
+### Added
+
+- `synth.py --classes N`: the synthetic control at 100 options, which crosses
+  `summary_for_options_over` and therefore exercises the summary row. Measured: 0.1000 → **0.3000**
+  held out at 6 epochs (84 updates), chance 0.0100 — the path that the vision program once shipped
+  broken builds and learns here.
+- The 50-way ESC-50 arm's run, reported at its real budget: 2 epochs (360 updates), accuracy
+  **0.0200** against a linear probe of **0.5265** on the same frozen features. It did not learn, and
+  the page says so and why, rather than dropping the arm; the number is what an untuned benchmark
+  looks like, and the FSDD arm shows what the same path does given epochs.
+
 ## [2.1.2] - 2026-11-05
 
 The audio path's first public numbers, and the two knobs that produce them.

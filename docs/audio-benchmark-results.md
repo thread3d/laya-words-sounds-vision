@@ -188,6 +188,35 @@ costs `k` rows per item instead of one (ten times the training cost here, which 
 measurement on a *learning* audio model is left for a GPU run — the chance-level state_conditioned
 arm already measured 0.0 %).
 
+### The 50-way arm, and a high-cardinality control
+
+The literature-comparable arm — 50 options, the joint head, 1 600 training clips per epoch — was run
+to the same wall-clock budget a CPU allows in one sitting: **2 epochs, 360 optimizer updates**.
+
+| ESC-50, fold 1, 400 held-out clips | accuracy | note |
+|---|---|---|
+| linear probe on the same frozen features | **0.5265** | closed form |
+| engine, 2 epochs (360 updates) | 0.0200 | chance is 0.0200 |
+
+It did not learn, and the honest reading is the same one the FSDD arm gives from the other side: at
+this budget the head is not trained. The 50-way engine number needs the FSDD arm's 15 epochs at
+least, which is 8x the wall clock and a GPU run here. Reported rather than omitted, because a
+2-epoch arm at chance is exactly what an untuned benchmark looks like.
+
+A 50-option head also crosses `summary_for_options_over`: the audio block carries its summary row,
+which is the high-cardinality path the vision program once shipped broken. So the summary row got a
+control of its own, `synth.py --classes 100` (120 rows, ten tones among 100 options):
+
+| 100-option synthetic task | accuracy |
+|---|---|
+| before | 0.1000 |
+| after 6 epochs (84 updates) | **0.3000** |
+| chance | 0.0100 |
+
+The summary row learns. That is the check that the vision program's trap — a plan reserving a row
+the projector never emitted, so high-cardinality heads could not even build — is not present on the
+audio path.
+
 ### Latency
 
 The same checkpoint, on this CPU, answering a 10-option question about a one-second recording:
