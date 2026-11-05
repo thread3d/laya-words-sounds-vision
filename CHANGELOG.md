@@ -6,6 +6,33 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.4] - 2026-11-05
+
+The largest cost of a media run is not the model.
+
+### Added
+
+- `laya-train --checkpoint-every N` (`TrainConfig.checkpoint_every`): `1` writes the recovery
+  checkpoint after every epoch (the old behaviour), `0` writes only the final one, `N` every N.
+- `research/benchmarks/audio_esc50/train.sh --train-rows/--eval-rows`: explicit row files win over
+  the dataset defaults, so a subset run is one flag.
+
+### Fixed
+
+- **The per-epoch recovery checkpoint cost more than the epoch it protects.** A media checkpoint is
+  ~1.2 GB (the encoder *plus* the bundled tower), and the trainer wrote one after every epoch:
+  measured **~6 minutes per write against 2.4 minutes of training per epoch** on this filesystem, so
+  a 12-epoch FSDD run spent about an hour of wall clock on crash protection. `--checkpoint-every 0`
+  drops it; the run still saves its final checkpoint.
+
+### Measured (documented in `docs/audio-benchmark-results.md`)
+
+- Row throughput by shape: 10-option rows run at 12.7 rows/s at `--micro-batch 8` and **25.4** at
+  `64`; 50-option rows at **5.9** and 5.3 — batching doubles short rows and does nothing for long
+  ones, which are memory-bandwidth bound.
+- `state_conditioned` costs ten rows per item but each row is cheaper: **42.3 rows/s** against 12.2
+  for the joint layout on the same data.
+
 ## [2.1.3] - 2026-11-05
 
 The high-cardinality control, and the 50-way arm reported as it ran.

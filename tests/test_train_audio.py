@@ -389,6 +389,26 @@ def test_an_audio_checkpoint_defaults_to_soft_ce_and_text_to_rlcd():
     assert TrainConfig(loss="rlcd").resolve_loss(has_vision=False, has_audio=True) == "rlcd"
 
 
+def test_a_media_run_can_throttle_its_recovery_checkpoint():
+    """`checkpoint_every` is the knob for the largest non-compute cost of a media run.
+
+    A checkpoint carries the encoder *and* the bundled tower -- ~1.2 GB -- and the trainer wrote one
+    after every epoch. Measured here: ~6 minutes per write against 2.4 minutes of training per
+    epoch, so the recovery copy cost more than the epoch it protects. `--checkpoint-every 0` keeps
+    the final checkpoint and drops the per-epoch ones.
+    """
+    assert TrainConfig().checkpoint_every == 1
+    for bad in (-1, True, 1.5):
+        try:
+            TrainConfig(checkpoint_every=bad).validate()
+        except ValueError as exc:
+            assert "checkpoint_every" in str(exc), exc
+            continue
+        raise AssertionError("checkpoint_every=%r should have been refused" % (bad,))
+    TrainConfig(checkpoint_every=0).validate()
+    TrainConfig(checkpoint_every=5).validate()
+
+
 def test_a_bad_audio_block_is_refused_at_argument_time():
     for block in ({"n_audio_tokens": 0}, {"sample_rate": 0}, {"nonsense": 1}):
         try:
@@ -575,6 +595,7 @@ if __name__ == "__main__":
     test_encoding_an_audio_item_produces_a_plan_and_keeps_the_markers()
     test_a_chunk_mixing_pictures_and_sounds_is_refused()
     test_an_audio_checkpoint_defaults_to_soft_ce_and_text_to_rlcd()
+    test_a_media_run_can_throttle_its_recovery_checkpoint()
     test_a_bad_audio_block_is_refused_at_argument_time()
     test_a_training_step_moves_the_loss_through_the_embeddings_path()
     test_the_audio_block_changes_the_training_logits()

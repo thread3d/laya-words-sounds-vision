@@ -195,6 +195,15 @@ def build_parser() -> argparse.ArgumentParser:
              "the only knob on it.",
     )
     parser.add_argument(
+        "--checkpoint-every",
+        dest="checkpoint_every",
+        type=int,
+        default=1,
+        help="write the per-epoch recovery checkpoint every N epochs; 0 writes only the final one. "
+             "A media checkpoint is ~1.2 GB (encoder plus bundled tower), which on a slow "
+             "filesystem can cost more than the epoch it protects",
+    )
+    parser.add_argument(
         "--option-layout",
         dest="option_layout",
         choices=("sequential", "parallel", "state_conditioned"),
@@ -279,6 +288,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         vision=vision,
         audio=audio,
         encode_workers=args.encode_workers,
+        checkpoint_every=args.checkpoint_every,
         option_layout=args.option_layout,
     )
 

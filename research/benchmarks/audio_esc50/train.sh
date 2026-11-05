@@ -21,6 +21,8 @@ export HF_HOME="${HF_HOME:-$REPO/.hf-cache}"
 arm="esc50-seq"
 fold="1"
 dataset="esc50"
+train_override=""
+eval_override=""
 epochs="3"
 audio_block='{"n_audio_tokens": 32}'
 layout="sequential"
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --arm) arm="$2"; shift 2 ;;
     --dataset) dataset="$2"; shift 2 ;;
+    --train-rows) train_override="$2"; shift 2 ;;
+    --eval-rows) eval_override="$2"; shift 2 ;;
     --fold) fold="$2"; shift 2 ;;
     --epochs) epochs="$2"; shift 2 ;;
     --audio-block) audio_block="$2"; shift 2 ;;
@@ -65,6 +69,11 @@ fi
 for path in "$train_rows" "$eval_rows"; do
   [[ -f "$path" ]] || { echo "missing $path -- run prep.py first" >&2; exit 2; }
 done
+
+# Explicit row files win over the dataset defaults, so a subset run (a smaller training set for a
+# layout that costs k rows per item) is one flag rather than a copied script.
+[[ -n "$train_override" ]] && train_rows="$train_override"
+[[ -n "$eval_override" ]] && eval_rows="$eval_override"
 
 echo "arm=$arm fold=$fold layout=$layout epochs=$epochs base=$BASE"
 echo "train=$train_rows"

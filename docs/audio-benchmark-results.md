@@ -231,6 +231,27 @@ That is the whole path — decode, the tower pass when the clip is new, the spli
 decision that depends on the audio (gate 1 = +0.655 above). The clip is one second and the
 `sequential` layout scores one row; a `state_conditioned` decision costs ten rows.
 
+Two throughput facts shaped the recipes, both measured here rather than assumed (56 CPU cores, no
+GPU, `ModernBERT-large` encoder):
+
+| row shape | rows/s at `--micro-batch 8` | at `64` |
+|---|---|---|
+| 10 options (~80 tokens incl. the audio block) | 12.7 | **25.4** |
+| 50 options (~195 tokens) | **5.9** | 5.3 |
+
+Batching doubles the throughput of short rows and does nothing for long ones: a 50-option head is
+memory-bandwidth bound, so the only lever there is fewer epochs or a GPU. That is why the FSDD arms
+run at `--micro-batch 16` and the 50-way arm is quoted in hours.
+
+`state_conditioned` costs ten rows per item but each row is *cheaper* — measured 42.3 rows/s against
+12.2 for the joint layout on the same data, because a row carries one option instead of ten markers.
+
+And the largest single cost of a media run turned out not to be the model at all: `laya-train` wrote
+a recovery checkpoint after every epoch, and a media checkpoint is ~1.2 GB (the encoder *plus* the
+bundled tower). Measured: **~6 minutes per write against 2.4 minutes of training per epoch** — the
+crash protection cost more than the epoch it protects. `--checkpoint-every 0` keeps the final
+checkpoint and drops the per-epoch ones, and the FSDD arms here run with it.
+
 The learning rate, not only the budget, was wrong for this regime, and it went the counter-intuitive
 way: raising `head_lr` from the default 1e-4 to 1e-3 made the loss *rise* (epoch means 2.146 then
 2.217), while the default rate descended on the same data (1.800 after one epoch). A 1024-wide head

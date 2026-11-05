@@ -125,6 +125,12 @@ class TrainConfig:
     # A vision or audio run spends most of its build time in a frozen tower, and one tower pass per
     # input is embarrassingly parallel; this is the knob, and the result is identical either way.
     encode_workers: int = 0
+    # How often the per-epoch recovery checkpoint is written: 0 = never (the run still saves its
+    # final checkpoint), N = every N epochs. A media checkpoint is ~1.2 GB (the encoder plus the
+    # bundled tower), so on a slow filesystem this is the largest single cost in a run that is
+    # otherwise minutes per epoch -- measured here at ~6 minutes per write against 2.4 minutes of
+    # training per epoch.
+    checkpoint_every: int = 1
     option_layout: Optional[str] = None
     freeze_encoder: bool = False
     calib_max: int = 400
@@ -185,6 +191,10 @@ class TrainConfig:
                 or self.encode_workers < 0:
             raise ValueError("encode_workers must be a non-negative integer (0 = auto), got %r"
                              % (self.encode_workers,))
+        if isinstance(self.checkpoint_every, bool) or not isinstance(self.checkpoint_every, int) \
+                or self.checkpoint_every < 0:
+            raise ValueError("checkpoint_every must be a non-negative integer (0 = only the final "
+                             "checkpoint), got %r" % (self.checkpoint_every,))
         if self.loss is not None and self.loss not in LOSSES:
             raise ValueError("loss must be one of %s (or None for the checkpoint default), got %r"
                              % (", ".join(LOSSES), self.loss))
@@ -1806,6 +1816,13 @@ def finetune(data: str, model_dir: str, output_dir: str, config: Optional[TrainC
         before_eval = evaluate_records(base_records, base_temp, base_temp_by_options)
 
     def checkpoint_latest(epoch, _loss):
+        # `checkpoint_every=0` turns the per-epoch recovery checkpoint off; the final checkpoint is
+        # written after training either way. A media run writes ~1.2 GB here (the encoder plus the
+        # bundled tower), which on a slow filesystem costs more than the epoch it is protecting.
+        if not config.checkpoint_every:
+            return
+        if (epoch + 1) % config.checkpoint_every:
+            return
         save_checkpoint(model, tok, dict(cfg, max_len=max_len, head_max_len=head_max_len),
                         os.path.join(output_dir, "checkpoint_latest"))
 
