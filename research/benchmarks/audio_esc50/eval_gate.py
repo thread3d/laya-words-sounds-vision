@@ -33,7 +33,12 @@ ROWS = os.path.join(DATA_ROOT, "esc50")
 
 
 class _Timed:
-    """A runner that records what each decision cost, and forwards everything else."""
+    """A runner that records what each decision cost, and forwards everything else.
+
+    Both entry points are wrapped: the gate answers one row at a time by default, but with
+    `--batch-size` it goes through `predict_batch`, and a timing wrapper that only knew about
+    `predict` reported zero decisions for a batched run (which then divided by zero).
+    """
 
     def __init__(self, agent):
         self.agent = agent
@@ -45,6 +50,14 @@ class _Timed:
             return self.agent.predict(state, questions)
         finally:
             self.latencies.append(time.time() - started)
+
+    def predict_batch(self, states, questions, **kwargs):
+        started = time.time()
+        try:
+            return self.agent.predict_batch(states, questions, **kwargs)
+        finally:
+            share = (time.time() - started) / max(1, len(states))
+            self.latencies.extend([share] * len(states))
 
     def __getattr__(self, name):
         return getattr(self.agent, name)
@@ -103,9 +116,10 @@ def main(argv=None) -> int:
         report["gate2b"] = gate2
         report["gate2b_seconds"] = round(time.time() - started, 1)
 
-    latencies = runner.latencies
+    latencies = runner.latencies or [float("nan")]
     report["latency"] = {
-        "decisions": len(latencies),
+        "decisions": len(runner.latencies),
+        "batched": args.batch_size > 1,
         "mean_ms": round(1000 * statistics.fmean(latencies), 1),
         "median_ms": round(1000 * statistics.median(latencies), 1),
         "p95_ms": round(1000 * sorted(latencies)[int(0.95 * (len(latencies) - 1))], 1),
@@ -129,9 +143,13 @@ def main(argv=None) -> int:
 
     print("rows %d  layout %s  load %.1fs"
           % (report["n_rows"], report["option_layout"], load_seconds), flush=True)
+    # `or` is wrong here: an accuracy of 0.0 is a real number and falsy, and printing it as nan
+    # hid the first (all-wrong) smoke run behind a "no data" message.
+    def shown(value):
+        return float("nan") if value is None else value
+
     print("accuracy %.4f  without-audio %.4f  gate1 gain %s  gate2b flips %s"
-          % (headline["accuracy"] or float("nan"),
-             headline["accuracy_without_audio"] or float("nan"),
+          % (shown(headline["accuracy"]), shown(headline["accuracy_without_audio"]),
              headline["gate1_gain"], headline["gate2b_flip_rate"]), flush=True)
     print("latency mean %(mean_ms).1f ms, median %(median_ms).1f ms, p95 %(p95_ms).1f ms"
           % report["latency"], flush=True)

@@ -27,7 +27,7 @@ for.
 |---|---|---|---|---|
 | [ESC-50](https://github.com/karolpiczak/ESC-50) | 2 000 five-second environmental recordings, 50 classes, 40 per class, pre-arranged into 5 folds so one source recording never straddles a fold | 616 MB zip, 44.1 kHz mono WAV | CC BY-NC 3.0 | **yes** — the standard small-data benchmark, with a human baseline and a decade of published numbers |
 | ESC-10 | the curated 10-class subset inside ESC-50 (400 clips) | inside ESC-50 | same | **yes** — small enough to run the `state_conditioned` layout (one row per option) on a CPU inside a session |
-| [Free Spoken Digit Dataset](https://github.com/Jakobovski/free-spoken-digit-dataset) | 3 000 spoken digits, 10 classes, 6 speakers, 8 kHz | ~10 MB | CC BY-SA 4.0 | planned fast tier: a decision task a CPU can train end to end in minutes |
+| [Free Spoken Digit Dataset](https://github.com/Jakobovski/free-spoken-digit-dataset) | 3 000 spoken digits, 10 classes, 6 speakers, 8 kHz | 16 MB | CC BY-SA 4.0 | **yes** — the fast tier: a speaker-disjoint decision task whose whole loop (prep, tower pass, probe) fits in a couple of minutes on a CPU |
 | [Speech Commands v2](https://arxiv.org/abs/1804.03209) | 105 829 one-second utterances, 35 words | 2.4 GB | CC BY 4.0 | not yet — the published numbers (AST 98.1 %, PANNs 97.1 %) need a GPU to reach |
 | [UrbanSound8K](https://urbansounddataset.weebly.com/urbansound8k.html) | 8 732 urban clips, 10 classes | ~6 GB | CC BY-NC | no — the download needs a form and an email |
 | [FSD50K](https://zenodo.org/record/4060432) | 51 197 clips, 200 classes | tens of GB | CC BY 4.0 (clips vary) | no — too large for this machine's budget |

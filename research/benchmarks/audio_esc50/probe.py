@@ -165,14 +165,24 @@ def _cached(row):
     return os.path.exists(os.path.join(FRAMES, stem + ".npz"))
 
 
-def evaluate_fold(rows_dir, fold, subset, mode, alphas):
-    train_rows = [r for r in _read(os.path.join(rows_dir, "%s_fold%d_train.jsonl" % (subset, fold)))
-                  if _cached(r)]
-    eval_rows = [r for r in _read(os.path.join(rows_dir, "%s_fold%d_eval.jsonl" % (subset, fold)))
-                 if _cached(r)]
+def _row_path(subset, fold, split, dataset="esc50"):
+    """Where the rows for one subset/fold/split live.
+
+    ESC-50 is cross-validated (five folds per subset); FSDD is split by speaker and has one split
+    pair, which the fold number is ignored for.
+    """
+    if dataset == "fsdd":
+        return os.path.join(ROWS, "..", "fsdd", "fsdd_%s.jsonl" % split)
+    return os.path.join(ROWS, "%s_fold%d_%s.jsonl" % (subset, fold, split))
+
+
+def evaluate_fold(rows_dir, fold, subset, mode, alphas, dataset="esc50"):
+    train_rows = [r for r in _read(_row_path(subset, fold, "train", dataset)) if _cached(r)]
+    eval_rows = [r for r in _read(_row_path(subset, fold, "eval", dataset)) if _cached(r)]
     if not train_rows or not eval_rows:
         return None
-    classes = train_rows[0]["questions"]["sound"]["criteria"]
+    question = next(iter(train_rows[0]["questions"]))
+    classes = train_rows[0]["questions"][question]["criteria"]
     index = {name: i for i, name in enumerate(classes)}
 
     def xy(rows):
@@ -180,7 +190,7 @@ def evaluate_fold(rows_dir, fold, subset, mode, alphas):
                       for r in rows])
         y = np.zeros((len(rows), len(classes)), dtype=np.float32)
         for i, row in enumerate(rows):
-            y[i, index[row["expected"]["sound"]]] = 1.0
+            y[i, index[row["expected"][question]]] = 1.0
         return x, y
 
     x_train_raw, y_train = xy(train_rows)
@@ -223,7 +233,7 @@ def summarise(folds):
     return out
 
 
-def _clip_list(subsets, folds, per_split):
+def _clip_list(subsets, folds, per_split, dataset="esc50"):
     """Every clip to encode, taken split by split so `--limit` gives a *scoreable* subset.
 
     A limit applied to a sorted file list would encode one fold's clips only -- ESC-50 filenames
@@ -233,8 +243,13 @@ def _clip_list(subsets, folds, per_split):
     for subset in subsets:
         for fold in folds:
             for name in ("train", "eval"):
-                rows = _read(os.path.join(ROWS, "%s_fold%d_%s.jsonl" % (subset, fold, name)))
-                for row in (rows if per_split is None else rows[:per_split]):
+                rows = _read(_row_path(subset, fold, name, dataset))
+                if per_split is not None:
+                    # Evenly spaced, not the first N: both row files are ordered by class, so a
+                    # prefix is one or two classes and a smoke test on it scores nothing real.
+                    stride = max(1, len(rows) // per_split)
+                    rows = rows[::stride][:per_split]
+                for row in rows:
                     path = row["state"]["audio_path"]
                     if path not in seen:
                         seen.add(path)
@@ -244,6 +259,8 @@ def _clip_list(subsets, folds, per_split):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default="esc50", choices=["esc50", "fsdd"],
+                        help="which rows to score: the 5-fold ESC-50 set or the speaker-split FSDD one")
     parser.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     parser.add_argument("--subsets", nargs="+", default=["esc50", "esc10"],
                         choices=["esc50", "esc10"])
@@ -256,14 +273,16 @@ def main(argv=None) -> int:
     parser.add_argument("--alphas", type=float, nargs="+", default=[1e-3, 1e-2, 1e-1, 1.0, 10.0])
     args = parser.parse_args(argv)
 
-    clips = _clip_list(args.subsets, args.folds, args.limit)
+    if args.dataset == "fsdd":
+        args.subsets, args.folds = ["fsdd"], [0]
+    clips = _clip_list(args.subsets, args.folds, args.limit, args.dataset)
     extract_all(clips, args.workers, args.threads)
 
     results = []
     for subset in args.subsets:
         for mode in args.features:
             for fold in args.folds:
-                row = evaluate_fold(ROWS, fold, subset, mode, args.alphas)
+                row = evaluate_fold(ROWS, fold, subset, mode, args.alphas, args.dataset)
                 if row is None:
                     print("%s %-8s fold %d: no cached frames for that fold" % (subset, mode, fold))
                     continue
@@ -274,7 +293,8 @@ def main(argv=None) -> int:
                          row["centroid"], row["ridge"], row["ridge_alpha"]), flush=True)
     report = {"arms": results, "summary": summarise(results), "tower": TOWER,
               "sample_rate": SAMPLE_RATE}
-    out = os.path.join(ROWS, "results_probe.json")
+    out = os.path.join(ROWS, "results_probe%s.json"
+                       % ("" if args.dataset == "esc50" else "_%s" % args.dataset))
     with open(out, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     print("\nwrote %s" % out)

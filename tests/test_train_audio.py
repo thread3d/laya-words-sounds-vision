@@ -463,6 +463,76 @@ def test_the_audio_block_changes_the_training_logits():
     assert not torch.allclose(a, b), "the audio block must reach the training logits"
 
 
+class _SignalTower(torch.nn.Module):
+    """A tower whose frames carry the class: the synthetic-learning test's stand-in.
+
+    A real wav2vec2 would make this a benchmark rather than a check, so the frames encode the class
+    directly: two fixed, *differently directed* patterns.
+
+    Direction, not scale, deliberately. The encoder applies its own LayerNorm to the spliced block,
+    which subtracts a per-token mean and normalises length -- so a class encoded as "louder" is the
+    same block to the model as one encoded as "quieter" (the trap `laya.vision` documents at
+    length). Encoding the class as a different direction is what makes the task learnable at all.
+    """
+
+    class config:
+        hidden_size = 32
+
+    def __init__(self):
+        super().__init__()
+        generator = torch.Generator().manual_seed(7)
+        self.patterns = torch.randn(2, 8, 32, generator=generator)
+
+    def forward(self, input_values):
+        # Count zero crossings, not amplitude: the loader peak-normalises every waveform, so a
+        # "loud" versus "quiet" class is one class to this path (a real finding, not a test bug).
+        crossings = (torch.sign(input_values[:, 1:]) != torch.sign(input_values[:, :-1])).sum(-1)
+        which = (crossings > 10).long()                              # [B]
+        return type("O", (), {"last_hidden_state": self.patterns[which]})()
+
+
+def test_the_audio_block_can_learn_a_task_end_to_end():
+    """The check the benchmark needed: a loss that falls through the block is not the same as a task
+    the block can learn.
+
+    On ESC-50 the first engine arm sat at chance, which had two possible causes -- a broken path, or
+    a recipe that never trained the head. A two-class synthetic task separated them: this test is
+    the same experiment in miniature, and it has to reach high accuracy, not merely move a weight.
+    """
+    torch.manual_seed(0)
+    model = _model()
+    tok = _StubTok()
+    audio = _audio()
+    enc = build_audio_encoder(audio, hidden_size=16, tower=_SignalTower()).eval()
+    model.audio_encoder = enc
+
+    question = {"type": "choice", "instructions": "Which tone is this?", "criteria": ["low", "high"]}
+    rows = []
+    for i in range(24):
+        label = "low" if i % 2 == 0 else "high"
+        rate = 4 if label == "low" else 40
+        wave = torch.sign(torch.sin(torch.linspace(0, 2 * 3.14159 * rate, 1600)))
+        rows.append({"state": {"audio": {"waveform": wave}, "text": "a tone"},
+                     "questions": {"q": question}, "expected": {"q": label}})
+    items, skipped = items_from_rows(tok, rows, max_len=512, head_max_len=192,
+                                     audio=audio, encode_audio=_encode_audio(enc))
+    assert skipped == {} and len(items) == 24, (skipped, len(items))
+    embeds = model.encoder.embeddings
+    table = getattr(embeds, "tok_embeddings", None) or embeds.word_embeddings
+
+    cfg = TrainConfig(epochs=6, micro_batch=8, grad_accum=1, head_lr=1e-2, log_every=0,
+                      loss="soft-ce", freeze_encoder=True, seed=0)
+    history = train_model(model, tok, items, cfg, torch.device("cpu"), 512, 192,
+                          audio=audio, embed_fn=table, max_positions=MAXPOS)
+    from laya.train import calibration_records, evaluate_records
+    records = calibration_records(model, tok, items, torch.device("cpu"), 512, 192,
+                                  audio=audio, embed_fn=table, max_positions=MAXPOS,
+                                  audio_projector=enc.projector)
+    report = evaluate_records(records, [1.0, 1.0, 1.0], {})
+    assert history[-1] < history[0], history
+    assert report["accuracy"] > 0.75, (report["accuracy"], history)
+
+
 def test_training_with_an_audio_encoder_attached_projects_inside_the_step():
     """The wiring `finetune` uses: the projector has to be found on the model to be optimised."""
     torch.manual_seed(0)
@@ -509,4 +579,5 @@ if __name__ == "__main__":
     test_a_training_step_moves_the_loss_through_the_embeddings_path()
     test_the_audio_block_changes_the_training_logits()
     test_training_with_an_audio_encoder_attached_projects_inside_the_step()
+    test_the_audio_block_can_learn_a_task_end_to_end()
     print("all audio training tests passed")

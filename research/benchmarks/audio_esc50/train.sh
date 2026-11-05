@@ -20,6 +20,7 @@ export HF_HOME="${HF_HOME:-$REPO/.hf-cache}"
 
 arm="esc50-seq"
 fold="1"
+dataset="esc50"
 epochs="3"
 audio_block='{"n_audio_tokens": 32}'
 layout="sequential"
@@ -28,6 +29,7 @@ extra=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arm) arm="$2"; shift 2 ;;
+    --dataset) dataset="$2"; shift 2 ;;
     --fold) fold="$2"; shift 2 ;;
     --epochs) epochs="$2"; shift 2 ;;
     --audio-block) audio_block="$2"; shift 2 ;;
@@ -44,12 +46,22 @@ case "$arm" in
   esc50-sc)  subset="esc50"; layout="state_conditioned" ;;
   esc10-sc)  subset="esc10"; layout="state_conditioned" ;;
   esc10-seq) subset="esc10"; layout="sequential" ;;
-  *) echo "unknown arm: $arm (esc50-seq, esc50-sc, esc10-sc, esc10-seq)" >&2; exit 2 ;;
+  fsdd-seq)  dataset="fsdd"; layout="sequential" ;;
+  fsdd-sc)   dataset="fsdd"; layout="state_conditioned" ;;
+  *) echo "unknown arm: $arm (esc50-seq, esc50-sc, esc10-sc, esc10-seq, fsdd-seq, fsdd-sc)" >&2
+     exit 2 ;;
 esac
 
-train_rows="$ROWS/${subset}_fold${fold}_train.jsonl"
-eval_rows="$ROWS/${subset}_fold${fold}_eval.jsonl"
-out="$DATA_ROOT/checkpoints/${arm}_fold${fold}"
+if [[ "$dataset" == "fsdd" ]]; then
+  FSDD="$DATA_ROOT/fsdd"
+  train_rows="$FSDD/fsdd_train.jsonl"
+  eval_rows="$FSDD/fsdd_eval.jsonl"
+  out="$DATA_ROOT/checkpoints/${arm}"
+else
+  train_rows="$ROWS/${subset}_fold${fold}_train.jsonl"
+  eval_rows="$ROWS/${subset}_fold${fold}_eval.jsonl"
+  out="$DATA_ROOT/checkpoints/${arm}_fold${fold}"
+fi
 for path in "$train_rows" "$eval_rows"; do
   [[ -f "$path" ]] || { echo "missing $path -- run prep.py first" >&2; exit 2; }
 done
