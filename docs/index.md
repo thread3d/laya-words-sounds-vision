@@ -9,7 +9,10 @@ hardware, reads 100+ languages, and its `Router` picks the checkpoint for each r
 carry an image as well as text, and a checkpoint trained with `--vision` answers from the pixels —
 on a public benchmark it beats both a linear probe and its own tower's zero-shot head, and passes
 the two gates that ask whether the image is doing the work and whether reordering the options
-changes the answer.
+changes the answer. A state can also carry a **sound**: a checkpoint trained with `--audio` answers
+from the recording — a dog bark, a raised voice, a failing engine — through the same block, layout
+and gates the picture uses. There is no audio benchmark in this repository yet, and the
+[sounds page](audio-decision-system.md) says so rather than borrowing the vision figures.
 
 ## Start here
 
@@ -33,6 +36,7 @@ is one copy to keep current.
 | build for ARM64 hosts or DGX Spark | [ARM64 and DGX Spark containers](docker-platforms.md) |
 | specialise a checkpoint for your own decisions | [Browser-agent fine-tuning example](finetune_browser_agent.md) and the [fine-tuning notebook](https://github.com/thread3d/laya-words-sounds-vision/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb) |
 | answer questions about a picture, or teach a checkpoint to look at one | [Vision fine-tuning](finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture) and [the measured results](vision-benchmark-results.md) |
+| answer questions about a recording, or teach a checkpoint to listen to one | [Sounds](audio-decision-system.md) and [sound fine-tuning](finetune.md#sounds-teaching-a-checkpoint-to-listen) |
 | judge benchmark results and deployment limits | [Benchmarks and known limits](benchmarks.md) |
 | look up a class, function or parameter | [Python API reference](reference/index.md) |
 | score a labelled dataset, compare to a baseline, or gate a build on it | [Evaluation harness](evals.md) |

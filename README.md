@@ -29,7 +29,7 @@ python -m pip install laya
 
 With [uv](https://docs.astral.sh/uv/), run `uv add laya` in a uv project or `uv pip install laya` in a virtual environment.
 
-Python 3.10 or newer. Optional extras: `laya[serve]` (HTTP server), `laya[mcp]` (MCP server), `laya[langchain]` (LangChain and LangGraph), `laya[llamaindex]` (LlamaIndex selectors), `laya[crewai]` (CrewAI routing), `laya[onnx]` (ONNX Runtime), `laya[fast]` (TileLang GPU fast path), `laya[structured]` (pydantic models in `decide`). Step-by-step setup for each platform, CPU-only or GPU PyTorch builds, and troubleshooting are in [Installation details](#installation-details).
+Python 3.10 or newer. Optional extras: `laya[serve]` (HTTP server), `laya[mcp]` (MCP server), `laya[langchain]` (LangChain and LangGraph), `laya[llamaindex]` (LlamaIndex selectors), `laya[crewai]` (CrewAI routing), `laya[onnx]` (ONNX Runtime), `laya[fast]` (TileLang GPU fast path), `laya[structured]` (pydantic models in `decide`), `laya[vision]` (Pillow, for decoding a picture) and `laya[audio]` (soundfile, for a compressed recording). Step-by-step setup for each platform, CPU-only or GPU PyTorch builds, and troubleshooting are in [Installation details](#installation-details).
 
 For TypeScript / Node.js / browser, see [`laya-ts/`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/laya-ts/). npm releases (`npm install laya-ts`) are published from this repository's `laya-ts-v*` release tags.
 
@@ -97,6 +97,25 @@ print(result["routing"]["model"], result["answers"]["stock"]["choice"])  # visio
 per distinct picture. See [vision fine-tuning](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture)
 and [the measured results](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/vision-benchmark-results.md).
 
+Asked about a sound, the state carries the recording. A checkpoint trained with `--audio` reads it,
+and the `Router` sends sound states to it when one is registered:
+
+```python
+router = Router(models={"audio": "./my-audio-checkpoint"})
+result = router.predict({"audio_path": "clip.wav", "text": "is this a dog barking?"},
+                        {"sound": {"type": "choice", "instructions": "What is this sound?",
+                                   "criteria": ["a dog", "a car", "a door"]}})
+print(result["routing"]["model"], result["answers"]["sound"]["choice"])  # audio a dog
+```
+
+The recording is decoded to a mono waveform at the tower's rate (byte and duration limits checked on
+the container header first), encoded once per distinct recording, and spliced after the options the
+same way a picture is. PCM WAV needs nothing extra; `pip install laya[audio]` adds FLAC/Ogg/MP3, and
+samples you already decoded skip the codec entirely. See [sounds](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-decision-system.md)
+and [sound fine-tuning](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/finetune.md#sounds-teaching-a-checkpoint-to-listen).
+There is **no audio benchmark in this repository yet**, so no accuracy figure is quoted for a sound
+checkpoint.
+
 From the command line, `laya "My payment failed twice" --preset triage` answers a ready-made question set. More in the [full quickstart](#quickstart-route-mode-recommended) and the [docs](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs).
 
 ## Fine-tune for better accuracy
@@ -108,6 +127,32 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 ## Documentation
 
 **[The documentation](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs)**: guides for [prediction hooks](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/hooks/index.md), [schema-driven decisions](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/structured.md), [Docker](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/docker.md) and [LangChain and LangGraph](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/langchain.md), plus a full [API reference](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/reference/index.md). `zensical build --strict` renders the same pages from `docs/`.
+
+## What's new in 1.1: sounds
+
+Words, sounds or vision. A state may now carry a **recording** as well as text or a picture, and a
+checkpoint trained with `--audio` answers from it.
+
+* **The audio path reuses the vision path's machinery, deliberately.** `laya.block` owns where a
+  block goes and how it is spliced, `laya.projector.PooledProjector` is the projector both train,
+  `laya.transport` owns reading a reference (bytes, path, base64, an opted-in URL) and `laya.cache`
+  the content-addressed LRU. A vision checkpoint is byte-identical after the refactor, and
+  `tests/test_audio.py` asserts the two plans agree number for number.
+* **A sound is measured before it is decoded.** `audio_info` reads WAV/FLAC/Ogg/MP3 headers and
+  `check_audio_bytes` refuses oversize, over-long or unmeasurable payloads before any decoder runs —
+  an hour of 48 kHz stereo fits inside a 12 MB compressed file.
+* **Decoding is optional.** PCM WAV goes through the standard library, `pip install laya[audio]` adds
+  `soundfile` for the compressed containers, and `{"audio": {"waveform": <tensor>}}` skips both.
+* **One block per state, enforced.** A state carrying both a picture and a sound is refused by name,
+  as is a batch that mixes picture rows with sound rows.
+* **The server and the MCP tools accept a recording**: `audio`, `audio_path`, `audio_url`,
+  `audio_base64`, with `LAYA_MAX_AUDIO_BYTES` / `LAYA_MAX_AUDIO_SECONDS` checked on the header and
+  URL fetching off unless `LAYA_ALLOW_AUDIO_URLS` says otherwise.
+* **The gates are the vision gates.** `laya-evals ablate --modality audio` removes the recording and
+  requires accuracy to fall; `laya-evals flip` is unchanged.
+* **Nothing about the accuracy is claimed.** There is no labelled audio benchmark in this repository
+  yet, so the docs state the layout and the gates and quote no number. The vision figures above come
+  from a harness in `research/benchmarks/`; the audio equivalent is the next step.
 
 ## What's new in 1.0.0
 
