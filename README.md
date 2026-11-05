@@ -113,8 +113,11 @@ the container header first), encoded once per distinct recording, and spliced af
 same way a picture is. PCM WAV needs nothing extra; `pip install laya[audio]` adds FLAC/Ogg/MP3, and
 samples you already decoded skip the codec entirely. See [sounds](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-decision-system.md)
 and [sound fine-tuning](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/finetune.md#sounds-teaching-a-checkpoint-to-listen).
-There is **no audio benchmark in this repository yet**, so no accuracy figure is quoted for a sound
-checkpoint.
+Measured here on FSDD (1 000 speaker-disjoint held-out recordings): **75.5 %** for the decision
+engine at 10-way, with an audio-removal gain of **+0.655** (removing the recording drops it to chance)
+and **69 ms** median CPU latency per decision. The linear probe on the same frozen features is 79.5 %,
+and [the results page](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-benchmark-results.md)
+has the ESC-50 numbers, the gates and the like-for-like caveats.
 
 From the command line, `laya "My payment failed twice" --preset triage` answers a ready-made question set. More in the [full quickstart](#quickstart-route-mode-recommended) and the [docs](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs).
 
@@ -158,9 +161,12 @@ the full entry.
   URL fetching off unless `LAYA_ALLOW_AUDIO_URLS` says otherwise.
 * **The gates are the vision gates.** `laya-evals ablate --modality audio` removes the recording and
   requires accuracy to fall; `laya-evals flip` is unchanged.
-* **Nothing about the accuracy is claimed.** There is no labelled audio benchmark in this repository
-  yet, so the docs state the layout and the gates and quote no number. The vision figures above come
-  from a harness in `research/benchmarks/`; the audio equivalent is the next step.
+* **The audio numbers are public and gated.** ESC-50 and FSDD through the shipped path: a frozen
+  linear probe at **52.65 %** on 50-way ESC-50, and the engine at **75.5 %** on 10-way FSDD with
+  gate 1 **+0.655** (the recording removed drops it to chance) and 69 ms per decision on a CPU. Gate
+  2b fails at 27.4 % on the joint layout — the same finding the vision program made — and
+  `state_conditioned` is the documented fix. See
+  [the results](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-benchmark-results.md).
 * **The design is written down.** [The sound decision system](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-decision-system.md)
   holds the contract, the layout, the tower knobs, the training data contract, the limits by layer,
   the non-goals and an explicit list of what is measured and what is not.

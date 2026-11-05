@@ -11,8 +11,9 @@ on a public benchmark it beats both a linear probe and its own tower's zero-shot
 the two gates that ask whether the image is doing the work and whether reordering the options
 changes the answer. A state can also carry a **sound**: a checkpoint trained with `--audio` answers
 from the recording — a dog bark, a raised voice, a failing engine — through the same block, layout
-and gates the picture uses. There is no audio benchmark in this repository yet, and the
-[sounds page](audio-decision-system.md) says so rather than borrowing the vision figures.
+and gates the picture uses. Measured on public data: **75.5 %** on 10-way FSDD with the recording
+removed dropping the answer to chance (gate 1 +0.655), and a frozen linear probe at 52.65 % on
+50-way ESC-50 — see [the results](audio-benchmark-results.md).
 
 ## Start here
 

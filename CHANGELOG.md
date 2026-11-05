@@ -6,6 +6,50 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.2] - 2026-11-05
+
+The audio path's first public numbers, and the two knobs that produce them.
+
+### Added
+
+- **The engine measured on public data.** FSDD, 2 000 training recordings and 1 000 speaker-disjoint
+  held-out clips, frozen encoder: **0.7550** accuracy at 10-way after 15 epochs (the linear probe on
+  the same frozen features is 0.7950), **gate 1 +0.655** — removing the recording drops accuracy to
+  chance 0.1000 — and **69 ms** median CPU latency per decision (p95 111 ms). Gate 2b fails at
+  **27.4 %** option-order flips on the joint layout, which is the failure the vision program measured
+  at 28.3 % and fixed with `state_conditioned`.
+- **`research/benchmarks/audio_esc50/synth.py`**: the two-minute control that separates "the audio
+  block cannot learn" from "the head was not trained" — 64 tone recordings through the real path,
+  0.5000 → 1.0000 accuracy in four epochs.
+
+### Fixed
+
+- Every page that said the audio capability had no public benchmark now points at the measured one:
+  the README, `docs/index.md`, `docs/audio-decision-system.md` §8, and the fine-tuning guide.
+- `docs/finetune.md` records what the runs taught about the knobs: the default epoch budget is too
+  small on a few hundred/thousand media rows (0.1490 at 3 epochs against 0.7550 at 15, same recipe),
+  and raising `head_lr` to 1e-3 makes the loss rise where the default 1e-4 descends.
+
+## [2.1.1] - 2026-11-05
+
+Diagnosis, not a new number: the first ESC-10 arm landed at chance and this release settles why.
+
+### Added
+
+- `research/benchmarks/audio_esc50/synth.py` and
+  `test_the_audio_block_can_learn_a_task_end_to_end`: a synthetic two-class tone task through the
+  real path, which reaches 1.0000 and proves the block carries learnable signal. The test's stub
+  tower keys on the zero-crossing rate rather than amplitude, because the loader peak-normalises
+  every waveform — a property worth pinning.
+
+### Fixed
+
+- `eval_gate.py`: the timing wrapper only knew `predict`, so a batched run reported zero decisions
+  and divided by zero; an accuracy of exactly 0.0 was printed as `nan` (`x or nan` treats 0.0 as
+  falsy). Both fixed; batched and single-row gates verified equal on real rows (0.0833 both ways).
+- `probe.py` gained `--dataset fsdd`, stratified smoke sampling, and a question-id-agnostic reader;
+  `prep_fsdd.py` and the `fsdd-seq`/`fsdd-sc` arms were added.
+
 ## [2.1.0] - 2026-11-05
 
 The first public audio benchmark, and the three defects it found on the way. ESC-50 measured through

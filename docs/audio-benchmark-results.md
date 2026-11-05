@@ -155,7 +155,59 @@ FSDD gives 2 000 training recordings rather than 288, and the same recipe as the
 |---|---|---|
 | linear probe on the same frozen features | **0.7950** | closed form |
 | 3 epochs, `--grad-accum 1 --head-lr 1e-3` | 0.1490 | 750 |
-| 20 epochs, same recipe | *measured below* | 5 000 |
+| **15 epochs, `--grad-accum 1`, default `head_lr`** | **0.7550** | 3 750 |
+
+So the head is slow, not unable: 3 750 updates take it from chance to **75.5 %**, within 4 points of the
+linear probe on the same frozen features. That is the engine's first real public number.
+
+```bash
+./research/benchmarks/audio_esc50/train.sh --arm fsdd-seq --epochs 15 -- --grad-accum 1
+python3 research/benchmarks/audio_esc50/eval_gate.py \
+  --checkpoint .audio-bench/checkpoints/fsdd-seq --rows ../fsdd/fsdd_eval.jsonl --batch-size 8
+```
+
+### The gates on that checkpoint
+
+The two gates are the reason the accuracy above means anything. Both were run on the same 1 000
+held-out recordings:
+
+| gate | measured | verdict (`--min-gain 0.35`, `--max-flip-rate 0.02`) |
+|---|---|---|
+| accuracy | 0.7550 | — |
+| accuracy with the recording removed | **0.1000** (chance) | — |
+| **gate 1 — sound necessity** | **+0.655** | **passes** |
+| **gate 2b — option-order invariance** | **27.4 % of answers flip** | **fails** |
+
+Gate 1 is the headline the shipped checkpoint could not produce before: remove the audio and the
+model falls from 75.5 % to chance, so the answer is about the recording and not about the text around
+it. Gate 2b is the failure the [vision program](vision-benchmark-results.md) already measured at
+28.3 % on CIFAR-20 — this arm uses the **joint** (`sequential`) layout, whose options are scored
+against each other, so a reordered list moves the answer. The fix is the same one vision shipped:
+`--option-layout state_conditioned`, one row per option, which scores 0.0 % flips by construction and
+costs `k` rows per item instead of one (ten times the training cost here, which is why the gate-2b=0
+measurement on a *learning* audio model is left for a GPU run — the chance-level state_conditioned
+arm already measured 0.0 %).
+
+### Latency
+
+The same checkpoint, on this CPU, answering a 10-option question about a one-second recording:
+
+| measurement | value |
+|---|---|
+| median decision | **69 ms** |
+| mean | 69 ms |
+| p95 | 111 ms |
+
+That is the whole path — decode, the tower pass when the clip is new, the splice, the encoder — for a
+decision that depends on the audio (gate 1 = +0.655 above). The clip is one second and the
+`sequential` layout scores one row; a `state_conditioned` decision costs ten rows.
+
+The learning rate, not only the budget, was wrong for this regime, and it went the counter-intuitive
+way: raising `head_lr` from the default 1e-4 to 1e-3 made the loss *rise* (epoch means 2.146 then
+2.217), while the default rate descended on the same data (1.800 after one epoch). A 1024-wide head
+over a frozen encoder on a few thousand rows has a narrow stable band, and the shipped default is
+inside it. That is worth knowing before anyone tunes a small media fine-tune: more updates, not a
+bigger step.
 
 Three epochs on 2 000 recordings is still not enough, and the trainer says so itself: it emitted its
 class-prior collapse warning ("mean within-row logit range 0.00876; calibration cross-entropy 2.302

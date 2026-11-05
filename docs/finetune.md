@@ -320,11 +320,21 @@ stretched), `n_audio_tokens`, `keep_layers`, `pooling`, `summary_for_options_ove
 `cache_size`. Everything the vision section says about `--option-layout`, the summary row, the
 projector file (`audio.safetensors`) and the before/after table applies here unchanged.
 
-**What is not measured yet.** The vision numbers above come from a published CIFAR-100 run; there is
-no equivalent audio benchmark in this repository yet, so this page states no accuracy figure for a
-sound checkpoint. The gate that matters is the same one — accuracy with the recording removed must
-fall, or the "audio" checkpoint is a text model with an expensive tower. `laya-evals ablate
---modality audio` does exactly that:
+**What a run like this measures, on public data.** [The audio results](audio-benchmark-results.md)
+train exactly this recipe on FSDD: 15 epochs, `--grad-accum 1`, default `head_lr`, frozen encoder →
+**0.7550** held out (the linear probe on the same frozen features is 0.7950), gate 1 **+0.655**, and
+**69 ms** median CPU latency per decision. Two things that run taught about the knobs on this page:
+
+* **The default epoch budget is too small for a few hundred or a few thousand media rows.** Three
+  epochs scored 0.1490 and the trainer printed its class-prior collapse warning; fifteen scored
+  0.7550 on the same data and recipe except for the length of the run. Raise `--epochs` and drop
+  `--grad-accum` to 1 before touching anything else.
+* **Raising `head_lr` is the wrong lever.** `--head-lr 1e-3` made the loss *rise* (2.146 → 2.217)
+  where the default 1e-4 descended, on a 1024-wide head over a frozen encoder.
+
+The gate that matters is the same one — accuracy with the recording removed must fall, or the
+"audio" checkpoint is a text model with an expensive tower. `laya-evals ablate --modality audio`
+does exactly that:
 
 ```bash
 laya-evals ablate eval.jsonl --model ./my-audio-checkpoint --modality audio --min-gain 0.35

@@ -129,12 +129,12 @@ identical by construction (`tests/test_audio.py` asserts the two plans agree num
 audio block changes the option logits end to end on a tiny model; a training step moves the head and
 the projector through the spliced-embeddings path; the header readers, the caps and the refusals.
 
-**Not measured, and stated as such:** there is no public-data audio benchmark in this repository
-yet. No accuracy figure for a sound checkpoint appears anywhere in these docs, because there is no
-run behind one. The vision page's numbers come from a CIFAR-100 harness in `research/benchmarks/`;
-the audio equivalent — a labelled sound set, the two gates, and a published result — is the next
-step, and until it exists the [fine-tuning guide](finetune.md#sounds-teaching-a-checkpoint-to-listen)
-says so rather than borrowing the vision figures.
+**What was missing until v2.1.2, and is now measured:** the audio benchmark exists.
+[The results page](audio-benchmark-results.md) holds ESC-50 (a frozen linear probe at
+0.5265 ± 0.0368 over five folds), FSDD (the engine at 0.7550 on 1 000 speaker-disjoint recordings,
+gate 1 +0.655, 69 ms per decision on a CPU) and the gate-2b failure of the joint layout at 27.4 %
+with the `state_conditioned` remedy the vision program already ships. The harness is
+`research/benchmarks/audio_esc50/` and every number in it has the command that produced it.
 
 ## 9. Non-goals
 
