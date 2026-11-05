@@ -528,6 +528,385 @@ def test_importing_laya_audio_does_not_import_torch():
     assert "ok" in out.stdout, out.stdout
 
 
+# -- containers: measured before a decoder runs ---------------------------------------------
+
+def _wav_bytes(seconds=0.5, rate=16000, channels=1, bits=16, freq=440.0, amp=0.5):
+    """A real WAV file built by the standard library, so no codec is needed to test one."""
+    import io
+    import math
+    import wave
+
+    n = int(seconds * rate)
+    peak = 2 ** (bits - 1) - 1
+    frames = bytearray()
+    for i in range(n):
+        value = amp * math.sin(2 * math.pi * freq * i / rate)
+        for channel in range(channels):
+            sample = int(max(-1.0, min(1.0, value * (1.0 if channel == 0 else 0.5))) * peak)
+            frames += sample.to_bytes(bits // 8, "little", signed=True)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(bits // 8)
+        handle.setframerate(rate)
+        handle.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+def _mp3_bytes(frames=None, payload=128000):
+    """A frame header plus an optional Xing tag: enough for a header reader, no real audio."""
+    header = b"\xff\xfb\x90\x00"                  # MPEG-1 Layer III, 128 kbps, 44.1 kHz, stereo
+    body = b"\x00" * 32                           # MPEG-1 stereo side information
+    if frames is not None:
+        body += b"Xing" + (0x1).to_bytes(4, "big") + int(frames).to_bytes(4, "big")
+    return header + body + b"\x00" * max(0, payload - len(header) - len(body))
+
+
+def _ogg_bytes(rate=48000, channels=2, granule=None):
+    """An Ogg page carrying an OpusHead identification header."""
+    packet = (b"OpusHead" + bytes([1, channels]) + (312).to_bytes(2, "little")
+              + rate.to_bytes(4, "little") + (0).to_bytes(2, "little") + b"\x00")
+    page = (b"OggS" + b"\x00" + b"\x02"
+            + (granule if granule is not None else 0).to_bytes(8, "little")
+            + (1).to_bytes(4, "little") + (0).to_bytes(4, "little")
+            + (0).to_bytes(4, "little") + bytes([1]) + bytes([len(packet)]) + packet)
+    return page
+
+
+def _have_soundfile():
+    try:
+        import soundfile  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _encoded_with_soundfile(fmt: str, seconds=0.3, rate=16000):
+    import io
+    import soundfile
+    import numpy as np
+
+    t = np.linspace(0, seconds, int(seconds * rate), endpoint=False)
+    samples = (0.5 * np.sin(2 * np.pi * 440 * t)).astype("float32")
+    buf = io.BytesIO()
+    soundfile.write(buf, samples, rate, format=fmt)
+    return buf.getvalue()
+
+
+def test_a_wav_header_is_measured_without_decoding():
+    from laya.audio import audio_info
+
+    info = audio_info(_wav_bytes(seconds=0.25, rate=16000))
+    assert info["format"] == "wav", info
+    assert info["sample_rate"] == 16000, info
+    assert info["channels"] == 1, info
+    assert abs(info["duration_seconds"] - 0.25) < 0.01, info
+
+
+def test_a_stereo_wav_header_reports_its_channels():
+    from laya.audio import audio_info
+
+    info = audio_info(_wav_bytes(seconds=0.1, rate=8000, channels=2))
+    assert info["channels"] == 2 and info["sample_rate"] == 8000, info
+
+
+def test_an_mp3_header_is_measured_from_its_frame():
+    from laya.audio import audio_info
+
+    info = audio_info(_mp3_bytes(frames=100))
+    assert info["format"] == "mp3", info
+    assert info["sample_rate"] == 44100, info
+    assert info["channels"] == 2, info
+    assert abs(info["duration_seconds"] - 100 * 1152 / 44100) < 1e-3, info
+
+
+def test_an_mp3_without_a_frame_count_estimates_from_its_bit_rate():
+    from laya.audio import audio_info
+
+    info = audio_info(_mp3_bytes(payload=16000))
+    assert info["duration_seconds"] is not None, info
+    assert abs(info["duration_seconds"] - 16000 * 8 / 128000) < 1e-3, info
+
+
+def test_an_ogg_identification_header_reports_its_rate_and_channels():
+    from laya.audio import audio_info
+
+    info = audio_info(_ogg_bytes(rate=48000, channels=2, granule=48000 * 3))
+    assert info["format"] == "ogg", info
+    assert info["sample_rate"] == 48000 and info["channels"] == 2, info
+    assert abs(info["duration_seconds"] - 3.0) < 0.01, info
+
+
+def test_flac_and_ogg_headers_are_measured():
+    if not _have_soundfile():
+        print("SKIP: soundfile is not installed")
+        return
+    from laya.audio import audio_info
+
+    for fmt, seconds in (("FLAC", 0.3), ("OGG", 0.3)):
+        info = audio_info(_encoded_with_soundfile(fmt, seconds=seconds))
+        assert info is not None and info["format"] in ("flac", "ogg"), (fmt, info)
+        assert info["sample_rate"] == 16000, (fmt, info)
+        assert info["duration_seconds"] is not None, (fmt, info)
+
+
+def test_an_unknown_container_is_refused():
+    from laya.audio import AudioRefused, audio_info, check_audio_bytes
+
+    assert audio_info(b"not a sound at all, really") is None
+    try:
+        check_audio_bytes(b"not a sound at all, really")
+    except AudioRefused as exc:
+        assert exc.reason == "audio_unsupported", exc.reason
+    else:
+        raise AssertionError("an unidentified payload must be refused, not decoded")
+
+
+def test_byte_and_duration_limits_are_enforced():
+    from laya.audio import AudioRefused, check_audio_bytes
+
+    wav = _wav_bytes(seconds=0.5, rate=16000)
+    assert check_audio_bytes(wav)["duration_seconds"] > 0
+    try:
+        check_audio_bytes(wav, max_bytes=len(wav) - 1)
+    except AudioRefused as exc:
+        assert exc.reason == "audio_too_large", exc.reason
+    else:
+        raise AssertionError("an oversize body must be refused")
+    try:
+        check_audio_bytes(wav, max_seconds=0.1)
+    except AudioRefused as exc:
+        assert exc.reason == "audio_too_long", exc.reason
+    else:
+        raise AssertionError("a recording over the duration cap must be refused")
+    try:
+        check_audio_bytes(b"", max_seconds=1)
+    except AudioRefused as exc:
+        assert exc.reason == "audio", exc.reason
+    else:
+        raise AssertionError("an empty body must be refused")
+
+
+def test_a_header_that_states_no_duration_is_refused_while_the_cap_is_in_force():
+    """'I could not measure it' is not the same as 'it is short' (the image path's rule, applied)."""
+    from laya.audio import AudioRefused, check_audio_bytes
+
+    ogg = _ogg_bytes(granule=0)
+    info = check_audio_bytes(ogg, max_seconds=0)
+    assert info["format"] == "ogg"
+    try:
+        check_audio_bytes(ogg, max_seconds=60)
+    except AudioRefused as exc:
+        assert exc.reason == "audio_unmeasurable", exc.reason
+        assert "re-encode" in exc.detail, exc.detail
+    else:
+        raise AssertionError("an unmeasured duration must be refused while a cap is in force")
+
+
+# -- decoding -------------------------------------------------------------------------------
+
+def test_pcm_wav_decodes_with_the_standard_library():
+    from laya.audio import load_waveform
+
+    wav = _wav_bytes(seconds=0.5, rate=16000)
+    waveform = load_waveform(wav)
+    assert waveform.dim() == 1 and waveform.dtype == torch.float32, (waveform.shape, waveform.dtype)
+    assert abs(waveform.numel() - 8000) < 2, waveform.numel()
+    assert waveform.abs().max().item() <= 1.0 + 1e-6
+
+
+def test_every_pcm_width_decodes():
+    from laya.audio import load_waveform
+
+    for bits in (8, 16, 24, 32):
+        waveform = load_waveform(_wav_bytes(seconds=0.05, rate=8000, bits=bits), sample_rate=8000)
+        assert waveform.numel() == 400, (bits, waveform.numel())
+        assert waveform.abs().max().item() > 0.1, (bits, "decoded as silence")
+
+
+def test_a_stereo_recording_is_downmixed_to_mono():
+    from laya.audio import load_waveform
+
+    mono = load_waveform(_wav_bytes(seconds=0.05, rate=8000, channels=1), sample_rate=8000,
+                         normalise=False)
+    stereo = load_waveform(_wav_bytes(seconds=0.05, rate=8000, channels=2), sample_rate=8000,
+                           normalise=False)
+    assert stereo.dim() == 1, stereo.shape
+    assert abs(stereo.numel() - mono.numel()) <= 2, (stereo.numel(), mono.numel())
+    # The second channel is half the first, so the mix is quieter than the mono version's peak.
+    assert stereo.abs().max().item() < mono.abs().max().item(), "the downmix ignored channel 1"
+
+
+def test_resampling_changes_the_length_and_keeps_the_tone():
+    from laya.audio import load_waveform
+
+    at_48k = _wav_bytes(seconds=0.5, rate=48000, freq=440.0)
+    waveform = load_waveform(at_48k, sample_rate=16000)
+    assert abs(waveform.numel() - 8000) < 40, waveform.numel()
+    # Count zero crossings: a 440 Hz tone crosses zero 880 times a second.
+    signs = torch.sign(waveform)
+    crossings = int((signs[1:] != signs[:-1]).sum().item())
+    hz = crossings / 2.0 / (waveform.numel() / 16000)
+    assert abs(hz - 440) < 40, hz
+
+
+def test_the_waveform_path_is_capped_by_max_seconds():
+    """A reference over the cap is *refused*; a caller-supplied waveform is *truncated*.
+
+    There is no header to refuse a bare tensor by, so the only honest thing left is to stop at the
+    cap -- and to say so here, because the two paths are deliberately different.
+    """
+    from laya.audio import load_waveform
+
+    waveform = load_waveform({"waveform": torch.ones(16000)}, sample_rate=8000, max_seconds=0.5,
+                             normalise=False)
+    assert waveform.numel() == 4000, waveform.numel()
+
+
+def test_peak_normalisation_makes_gain_irrelevant():
+    from laya.audio import load_waveform
+
+    loud = _wav_bytes(seconds=0.1, rate=8000, amp=0.9)
+    quiet = _wav_bytes(seconds=0.1, rate=8000, amp=0.1)
+    normalised_loud = load_waveform(loud, sample_rate=8000)
+    normalised_quiet = load_waveform(quiet, sample_rate=8000)
+    assert abs(normalised_loud.abs().max().item() - 1.0) < 1e-3
+    assert torch.allclose(normalised_loud, normalised_quiet, atol=1e-3), \
+        "the same recording at two gains must decode to the same waveform"
+    raw = load_waveform(quiet, sample_rate=8000, normalise=False)
+    assert raw.abs().max().item() < 0.2, raw.abs().max().item()
+
+
+def test_a_waveform_mapping_bypasses_the_decoder():
+    from laya.audio import load_waveform
+
+    samples = torch.linspace(-0.5, 0.5, 1000)
+    out = load_waveform({"waveform": samples}, sample_rate=8000, normalise=False)
+    assert out.numel() == 1000 and torch.allclose(out, samples)
+    stereo = load_waveform({"waveform": torch.stack([samples, samples])}, sample_rate=8000,
+                           normalise=False)
+    assert stereo.numel() == 1000, stereo.shape
+
+
+def test_a_compressed_file_decodes_through_soundfile():
+    if not _have_soundfile():
+        print("SKIP: soundfile is not installed")
+        return
+    from laya.audio import load_waveform
+
+    for fmt in ("FLAC", "OGG"):
+        waveform = load_waveform(_encoded_with_soundfile(fmt, seconds=0.3), sample_rate=16000)
+        assert waveform.numel() > 4000, (fmt, waveform.numel())
+        assert waveform.abs().max().item() > 0.5, (fmt, "decoded as silence")
+
+
+def test_compressed_formats_name_the_extra_when_the_decoder_is_missing():
+    """A missing optional dependency must say what to install, not raise a bare ImportError."""
+    import sys
+
+    from laya.audio import decode_waveform
+
+    hidden = sys.modules.get("soundfile")
+    sys.modules["soundfile"] = None
+    try:
+        try:
+            decode_waveform(_mp3_bytes(frames=10))
+        except ImportError as exc:
+            assert "laya[audio]" in str(exc), str(exc)
+        else:
+            raise AssertionError("a missing decoder must be reported, not worked around")
+    finally:
+        if hidden is None:
+            del sys.modules["soundfile"]
+        else:
+            sys.modules["soundfile"] = hidden
+
+
+# -- the reference surface ------------------------------------------------------------------
+
+def test_urls_are_off_unless_the_deployment_opts_in():
+    from laya.audio import ALLOW_AUDIO_URLS_ENV, AudioRefused, read_audio_bytes
+
+    previous = os.environ.pop(ALLOW_AUDIO_URLS_ENV, None)
+    try:
+        try:
+            read_audio_bytes({"url": "http://169.254.169.254/latest/meta-data/"})
+        except AudioRefused as exc:
+            assert exc.reason == "audio_url_disabled", exc.reason
+            assert ALLOW_AUDIO_URLS_ENV in exc.detail, exc.detail
+        else:
+            raise AssertionError("URL fetching must be opt-in")
+        try:
+            read_audio_bytes({"url": "file:///etc/passwd"}, allow_url=True)
+        except AudioRefused as exc:
+            assert exc.reason == "audio_url_scheme", exc.reason
+        else:
+            raise AssertionError("only http(s) may be fetched, even when opted in")
+    finally:
+        if previous is not None:
+            os.environ[ALLOW_AUDIO_URLS_ENV] = previous
+    # ... and the opt-in is what the environment variable actually controls.
+    os.environ[ALLOW_AUDIO_URLS_ENV] = "1"
+    try:
+        from laya.audio import allow_audio_urls
+        assert allow_audio_urls() is True
+    finally:
+        os.environ.pop(ALLOW_AUDIO_URLS_ENV, None)
+
+
+def test_references_resolve_to_the_same_bytes():
+    import base64
+
+    from laya.audio import read_audio_bytes
+
+    wav = _wav_bytes(seconds=0.05, rate=8000)
+    assert read_audio_bytes(wav) == wav
+    assert read_audio_bytes({"bytes": wav}) == wav
+    assert read_audio_bytes(base64.b64encode(wav).decode()) == wav
+    assert read_audio_bytes({"base64": base64.b64encode(wav).decode()}) == wav
+
+
+def test_a_path_reference_is_read_with_the_cap():
+    from laya.audio import AudioRefused, read_audio_bytes
+
+    wav = _wav_bytes(seconds=0.05, rate=8000)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        handle.write(wav)
+        path = handle.name
+    try:
+        assert read_audio_bytes({"path": path}) == wav
+        try:
+            read_audio_bytes({"path": path}, max_bytes=8)
+        except AudioRefused as exc:
+            assert exc.reason == "audio_too_large", exc.reason
+        else:
+            raise AssertionError("a file over the byte cap must be refused by size, unread")
+    finally:
+        os.unlink(path)
+
+
+def test_the_audio_cache_encodes_once_per_sound():
+    from laya.audio import AudioCache
+
+    cache = AudioCache(max_entries=2)
+    calls = []
+
+    def encode(samples):
+        calls.append(1)
+        return samples * 2
+
+    samples = torch.randn(400)
+    first = cache.get_or_encode(samples, encode)
+    second = cache.get_or_encode(samples, encode)
+    assert torch.equal(first, second) and len(calls) == 1, (len(calls), cache.hits, cache.misses)
+    # `summary` changes the block's width, so it is a different entry for the same sound.
+    cache.get_or_encode(samples, encode, summary=True)
+    assert len(calls) == 2, len(calls)
+    for i in range(5):
+        cache.get_or_encode(torch.randn(400) + i, encode)
+    assert len(cache) <= 2, len(cache)
+
+
 if __name__ == "__main__":
     test_no_block_means_no_audio_config()
     test_explicitly_disabled_block_parses_to_none()
@@ -566,4 +945,26 @@ if __name__ == "__main__":
     test_load_tower_builds_a_frozen_wav2vec_tower_without_the_hub()
     test_an_audio_block_reaches_the_option_logits()
     test_importing_laya_audio_does_not_import_torch()
+    test_a_wav_header_is_measured_without_decoding()
+    test_a_stereo_wav_header_reports_its_channels()
+    test_an_mp3_header_is_measured_from_its_frame()
+    test_an_mp3_without_a_frame_count_estimates_from_its_bit_rate()
+    test_an_ogg_identification_header_reports_its_rate_and_channels()
+    test_flac_and_ogg_headers_are_measured()
+    test_an_unknown_container_is_refused()
+    test_byte_and_duration_limits_are_enforced()
+    test_a_header_that_states_no_duration_is_refused_while_the_cap_is_in_force()
+    test_pcm_wav_decodes_with_the_standard_library()
+    test_every_pcm_width_decodes()
+    test_a_stereo_recording_is_downmixed_to_mono()
+    test_resampling_changes_the_length_and_keeps_the_tone()
+    test_the_waveform_path_is_capped_by_max_seconds()
+    test_peak_normalisation_makes_gain_irrelevant()
+    test_a_waveform_mapping_bypasses_the_decoder()
+    test_a_compressed_file_decodes_through_soundfile()
+    test_compressed_formats_name_the_extra_when_the_decoder_is_missing()
+    test_urls_are_off_unless_the_deployment_opts_in()
+    test_references_resolve_to_the_same_bytes()
+    test_a_path_reference_is_read_with_the_cap()
+    test_the_audio_cache_encodes_once_per_sound()
     print("all audio foundation tests passed")

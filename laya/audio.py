@@ -31,9 +31,13 @@ it (it never sees samples); the decoder does, and the config states the rate as 
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from .block import BlockPlan, describe_plan as _describe_block_plan, plan_block, reserved_positions
 from .block import POSITION_POLICIES, SLOTS
+from .cache import ContentCache
 from .projector import PooledProjector, tower_width, truncate_tower, _torch
+from .transport import Refused, read_reference
 
 # How the projected frame tokens are compressed before they enter the text sequence.
 POOLINGS = ("adaptive_avg", "none")
@@ -383,6 +387,470 @@ def build_audio_encoder(config: AudioConfig, hidden_size: int, tower=None, dtype
 def tower_parameters(encoder: AudioEncoder):
     """The trainable parameters of an audio encoder (the tower stays frozen by default)."""
     return encoder.projector.parameters()
+
+
+# ------------------------------------------------------------------------------------------------
+# A sound inside a state: what is decoded, and what is refused before a decoder runs
+# ------------------------------------------------------------------------------------------------
+#
+# The image path checks a header before it decodes, because a 40-byte PNG can declare 30000x30000
+# pixels and decoding it first is a decompression bomb. A recording has the same shape of problem in
+# two dimensions: bytes that were never going to fit in memory, and *duration*. An hour of 48 kHz
+# stereo is 690 MB decoded, and it fits inside a 12 MB compressed file, so "the upload is small" is
+# not the question -- the sample count is. Both are answered from the container header alone, before
+# any decoder runs, which is also why they work on an install without the audio extra.
+
+MAX_AUDIO_BYTES = 12 * 1024 * 1024       # 12 MB, the same request-body budget images get
+MAX_AUDIO_SECONDS = 120.0                # two minutes, the default `max_audio_seconds`
+
+# A deployment opts into fetching a URL for the same reason it opts into anything else that reaches
+# its network: the engine runs on the operator's hardware and must not become an egress proxy.
+ALLOW_AUDIO_URLS_ENV = "LAYA_ALLOW_AUDIO_URLS"
+
+
+class AudioRefused(Refused):
+    """A refused sound, carrying the reason a caller should be told.
+
+    The reading policy itself is shared with the image path (`laya.transport`); this class only
+    keeps the audio path's name and reason codes for it.
+    """
+
+    def __init__(self, reason: str, detail: str):
+        super().__init__("audio", reason, detail)
+
+
+def allow_audio_urls() -> bool:
+    """Whether this deployment fetches an ``audio_url`` reference. Off unless explicitly asked."""
+    return os.environ.get(ALLOW_AUDIO_URLS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def audio_info(data) -> Optional[Dict[str, Any]]:
+    """Format, sample rate, channels and duration read from the container header, without decoding.
+
+    Covers WAV, FLAC, Ogg (Vorbis and Opus) and MP3 -- the formats a caller actually sends. Returns
+    ``None`` for anything else rather than guessing; the caller decides whether an unidentified
+    header is a refusal or merely unmeasured.
+
+    Durations are exact where the container states them (WAV's data chunk over its byte rate,
+    FLAC's `total_samples`, Ogg's last granule position) and an *estimate* for MP3, whose header
+    states a bit rate rather than a length: a variable-bit-rate file can be tens of percent off,
+    which is why the decoded sample count is capped as well (`load_waveform`).
+    """
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 12:
+        return None
+    data = bytes(data)
+    for reader in (_wav_info, _flac_info, _ogg_info, _mp3_info):
+        info = reader(data)
+        if info is not None:
+            return info
+    return None
+
+
+def _wav_info(data):
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return None
+    fmt: Optional[Dict[str, Any]] = None
+    data_size: Optional[int] = None
+    pos = 12
+    while pos + 8 <= len(data):
+        chunk = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        body = pos + 8
+        if chunk == b"fmt " and size >= 16 and body + 16 <= len(data):
+            fmt = {
+                "audio_format": int.from_bytes(data[body:body + 2], "little"),
+                "channels": int.from_bytes(data[body + 2:body + 4], "little"),
+                "sample_rate": int.from_bytes(data[body + 4:body + 8], "little"),
+                "byte_rate": int.from_bytes(data[body + 8:body + 12], "little"),
+                "bits": int.from_bytes(data[body + 14:body + 16], "little"),
+            }
+        elif chunk == b"data":
+            # A streamed WAV may write 0 or 0xFFFFFFFF as "unknown"; the bytes actually present are
+            # then the honest answer.
+            data_size = size if 0 < size <= len(data) - body else len(data) - body
+            break
+        pos = body + size + (size & 1)
+    if fmt is None:
+        return None
+    duration = None
+    if fmt["byte_rate"] > 0 and data_size:
+        duration = data_size / fmt["byte_rate"]
+    elif fmt["sample_rate"] > 0 and fmt["channels"] > 0 and fmt["bits"] > 0 and data_size:
+        frames = data_size // max(1, fmt["channels"] * fmt["bits"] // 8)
+        duration = frames / fmt["sample_rate"]
+    return {"format": "wav", "sample_rate": fmt["sample_rate"], "channels": fmt["channels"],
+            "bits": fmt["bits"], "duration_seconds": duration}
+
+
+def _flac_info(data):
+    if data[:4] != b"fLaC":
+        return None
+    pos = 4
+    while pos + 4 <= len(data):
+        header = data[pos]
+        block_type = header & 0x7F
+        length = int.from_bytes(data[pos + 1:pos + 4], "big")
+        if block_type == 0 and length >= 34 and pos + 4 + 18 <= len(data):
+            body = data[pos + 4:pos + 4 + length]
+            # STREAMINFO: 16+16 bits of block size, 24+24 of frame size, then one 64-bit field
+            # holding the sample rate (20), channels-1 (3), bits-1 (5) and total samples (36).
+            packed = int.from_bytes(body[10:18], "big")
+            rate = (packed >> 44) & 0xFFFFF
+            channels = ((packed >> 41) & 0x7) + 1
+            bits = ((packed >> 36) & 0x1F) + 1
+            total = packed & ((1 << 36) - 1)
+            return {"format": "flac", "sample_rate": rate, "channels": channels, "bits": bits,
+                    "duration_seconds": (total / rate) if rate and total else None}
+        pos += 4 + length
+        if header & 0x80:
+            break
+    return None
+
+
+def _ogg_info(data):
+    if data[:4] != b"OggS":
+        return None
+    pos = 0
+    rate: Optional[int] = None
+    channels: Optional[int] = None
+    pre_skip = 0
+    while pos + 27 <= len(data) and data[pos:pos + 4] == b"OggS":
+        segments = data[pos + 26]
+        body = pos + 27 + segments
+        size = sum(data[pos + 27:body])
+        packet = data[body:body + size]
+        if packet[1:7] == b"vorbis" and len(packet) >= 16:
+            channels = packet[11]
+            rate = int.from_bytes(packet[12:16], "little")
+            break
+        if packet[:8] == b"OpusHead" and len(packet) >= 16:
+            channels = packet[9]
+            pre_skip = int.from_bytes(packet[10:12], "little")
+            rate = int.from_bytes(packet[12:16], "little") or 48000
+            break
+        if not segments:
+            break
+        pos = body + size
+    if rate is None:
+        return None
+    # The last page's granule position is the stream's length in samples at `rate`.
+    tail_start = max(0, len(data) - 65536)
+    last = data.rfind(b"OggS", tail_start)
+    duration = None
+    if last >= 0 and last + 14 <= len(data):
+        granule = int.from_bytes(data[last + 6:last + 14], "little")
+        if granule and granule != 0xFFFFFFFFFFFFFFFF:
+            duration = max(0.0, (granule - pre_skip) / rate)
+    return {"format": "ogg", "sample_rate": rate, "channels": channels, "bits": None,
+            "duration_seconds": duration}
+
+
+_MP3_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+_MP3_BITRATES = {
+    3: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+    0: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+}
+
+
+def _mp3_info(data):
+    start = 0
+    if data[:3] == b"ID3" and len(data) >= 10:
+        size = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) \
+            | ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+        start = 10 + size
+    # Find a frame sync: 11 set bits, and a version/layer pair that is not reserved.
+    pos = start
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF or (data[pos + 1] & 0xE0) != 0xE0:
+            pos += 1
+            continue
+        header = int.from_bytes(data[pos:pos + 4], "big")
+        version = (header >> 19) & 0x3
+        layer = (header >> 17) & 0x3
+        rate_index = (header >> 10) & 0x3
+        if version == 1 or layer == 0 or rate_index == 3:
+            pos += 1
+            continue
+        rate = _MP3_RATES[version][rate_index]
+        bitrate_index = (header >> 12) & 0xF
+        bitrate = _MP3_BITRATES[version][bitrate_index] * 1000 if bitrate_index < 15 else 0
+        channels = 1 if ((header >> 6) & 0x3) == 3 else 2
+        payload = len(data) - pos
+        # A Xing/Info header carries the frame count, which is the only exact duration an MP3 has.
+        side = 32 if (version == 3 and channels == 2) else 17
+        tag = data[pos + 4 + side:pos + 4 + side + 4]
+        duration = None
+        if tag[:4] in (b"Xing", b"Info") and pos + 4 + side + 12 <= len(data):
+            flags = int.from_bytes(data[pos + 4 + side + 4:pos + 4 + side + 8], "big")
+            if flags & 0x1:
+                frames = int.from_bytes(data[pos + 4 + side + 8:pos + 4 + side + 12], "big")
+                duration = frames * 1152 / rate
+        if duration is None and bitrate:
+            duration = payload * 8 / bitrate
+        return {"format": "mp3", "sample_rate": rate, "channels": channels, "bits": None,
+                "duration_seconds": duration}
+    return None
+
+
+def check_audio_bytes(data, max_bytes: Optional[int] = None,
+                      max_seconds: Optional[float] = None) -> Dict[str, Any]:
+    """Refuse a recording that is too large to decode, before any decoder sees it.
+
+    Returns what :func:`audio_info` found, so a caller that wants the duration does not parse the
+    header twice. An unidentified format is refused: unlike an image, there is no "decode it anyway
+    and see" for a waveform, because the decoder is the thing being protected. A container that
+    states no duration is refused while a duration cap is in force -- "I could not measure it" is
+    not the same as "it is short". `max_seconds=0` disables the duration check for a deployment that
+    trusts its own inputs; the byte cap still applies.
+    """
+    max_bytes = MAX_AUDIO_BYTES if max_bytes is None else int(max_bytes)
+    max_seconds = MAX_AUDIO_SECONDS if max_seconds is None else float(max_seconds)
+    if max_seconds <= 0:
+        # Zero (or negative) is how a caller says "no duration limit": a deployment that serves
+        # short clips it already trusts should not be forced to state a number it does not mean.
+        max_seconds = None
+    if not isinstance(data, (bytes, bytearray)):
+        raise AudioRefused("audio", "expected bytes, got %s" % type(data).__name__)
+    if not data:
+        raise AudioRefused("audio", "empty body")
+    if len(data) > max_bytes:
+        raise AudioRefused("audio_too_large",
+                           "%d bytes exceeds the %d-byte limit" % (len(data), max_bytes))
+    info = audio_info(data)
+    if info is None:
+        raise AudioRefused("audio_unsupported", "not a WAV, FLAC, Ogg or MP3 file")
+    rate, channels = info.get("sample_rate"), info.get("channels")
+    if not rate or not channels:
+        raise AudioRefused("audio_invalid",
+                           "the %s header states %r Hz on %r channel(s)"
+                           % (info.get("format"), rate, channels))
+    duration = info.get("duration_seconds")
+    if duration is None:
+        if max_seconds:
+            raise AudioRefused(
+                "audio_unmeasurable",
+                "the %s header does not state its duration, so the %g-second limit cannot be "
+                "checked; re-encode to WAV or FLAC, or raise the limit for this deployment"
+                % (info.get("format"), max_seconds))
+    elif duration > max_seconds:
+        raise AudioRefused("audio_too_long",
+                           "%.1f seconds exceeds the %g-second limit"
+                           % (duration, max_seconds))
+    return info
+
+
+def read_audio_bytes(spec, max_bytes: Optional[int] = None, max_seconds: Optional[float] = None,
+                     allow_url: Optional[bool] = None, timeout: float = 5.0) -> bytes:
+    """Resolve a sound reference into raw bytes, applying the transport limits.
+
+    Accepted forms: raw ``bytes`` (already read), a filesystem ``path``, a base64 string, a mapping
+    with one of ``bytes``/``path``/``url``/``base64``, or -- only when URL fetching is on -- an
+    ``http(s)`` URL. URL fetching is off unless ``LAYA_ALLOW_AUDIO_URLS`` says otherwise, for the
+    reason the image path gives: a self-hosted engine that fetches what a request names is an
+    egress proxy pointed at the operator's own network.
+    """
+    def refuse(reason: str, detail: str):
+        raise AudioRefused(reason, detail)
+
+    if allow_url is None:
+        allow_url = allow_audio_urls()
+    data = read_reference(spec, kind="audio",
+                          max_bytes=MAX_AUDIO_BYTES if max_bytes is None else int(max_bytes),
+                          allow_url=allow_url, url_env=ALLOW_AUDIO_URLS_ENV, timeout=timeout,
+                          refuse=refuse)
+    check_audio_bytes(data, max_bytes=max_bytes, max_seconds=max_seconds)
+    return data
+
+
+def _soundfile():
+    """Import the optional decoder, naming the extra when it is missing.
+
+    `soundfile` is `pip install laya[audio]`. It is optional on purpose: the package's declared
+    dependencies stay torch/transformers/safetensors/huggingface_hub/numpy, so a text or vision
+    install never grows a codec stack. A caller with its own decoder passes
+    ``{"waveform": <tensor>}`` and skips this entirely, and PCM WAV decodes with the standard
+    library either way.
+    """
+    try:
+        import soundfile
+    except ImportError as exc:                                  # pragma: no cover - optional dep
+        raise ImportError(
+            "decoding a %s file needs soundfile: `pip install laya[audio]`, or pass "
+            "{'waveform': <tensor>} with your own decoder" % "compressed audio") from exc
+    return soundfile
+
+
+def decode_waveform(data, info: Optional[Dict[str, Any]] = None,
+                    max_seconds: Optional[float] = None):
+    """Decode container bytes into ``[channels, frames]`` float32 samples in [-1, 1].
+
+    WAV goes through the standard library, so a PCM recording needs no extra installed at all; the
+    compressed formats go through `soundfile` (`pip install laya[audio]`). `max_seconds` is enforced
+    here as well as in :func:`check_audio_bytes`, because an MP3's duration is an estimate and the
+    decoder is where a wrong estimate would become work.
+    """
+    torch = _torch()
+    info = info if info is not None else audio_info(data)
+    if info is None:
+        raise AudioRefused("audio_unsupported", "not a WAV, FLAC, Ogg or MP3 file")
+    fmt = info["format"]
+    rate = info["sample_rate"]
+    max_frames = int(max_seconds * rate) if max_seconds else None
+    if fmt == "wav" and info.get("audio_format") == 1:
+        return _decode_wav_pcm(data, info, max_frames, torch)
+    soundfile = _soundfile()
+    import io
+    try:
+        samples, rate = soundfile.read(io.BytesIO(data), dtype="float32", always_2d=True)
+    except Exception as exc:                                     # noqa: BLE001 - codec errors
+        raise AudioRefused("audio_invalid", "the %s decoder refused it: %s" % (fmt, exc)) from exc
+    if samples.size == 0:
+        raise AudioRefused("audio_invalid", "the %s decoder produced no samples" % fmt)
+    if max_frames is not None:
+        samples = samples[:max_frames]
+    return torch.from_numpy(samples.T.copy()), rate
+
+
+def _decode_wav_pcm(data, info, max_frames, torch):
+    """PCM WAV through `wave`: 8/16/24/32-bit integers, no third-party decoder."""
+    import io
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            channels, width, rate = handle.getnchannels(), handle.getsampwidth(), handle.getframerate()
+            frames = handle.getnframes()
+            if max_frames is not None:
+                frames = min(frames, max_frames)
+            raw = handle.readframes(frames)
+    except (wave.Error, EOFError) as exc:
+        raise AudioRefused("audio_invalid", "the WAV container refused it: %s" % exc) from exc
+    if width == 1:
+        samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 2:
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 3:
+        raw24 = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        packed = raw24[:, 0] | (raw24[:, 1] << 8) | (raw24[:, 2] << 16)
+        samples = (packed.astype(np.float32) - (packed.astype(np.float32) >= 8388608) * 16777216) \
+            / 8388608.0
+    elif width == 4:
+        samples = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise AudioRefused("audio_invalid", "unsupported PCM width %d bytes" % width)
+    usable = (len(samples) // channels) * channels if channels else 0
+    samples = samples[:usable].reshape(-1, channels).T
+    if samples.size == 0:
+        raise AudioRefused("audio_invalid", "the WAV file holds no frames")
+    return torch.from_numpy(samples.copy()), rate
+
+
+def resample(waveform, from_rate: int, to_rate: int):
+    """Resample ``[channels, frames]`` between two rates, in plain torch.
+
+    Linear interpolation, with a moving-average low-pass on the way *down*: decimating 48 kHz to
+    16 kHz without one folds everything above 8 kHz back into the band the tower reads. It is not a
+    polyphase resampler and the documentation says so -- the tower's own convolutional front end
+    band-limits, and a decision engine cares about prosody and events, not about broadcasting.
+    """
+    torch = _torch()
+    if from_rate == to_rate or waveform.size(-1) == 0:
+        return waveform
+    ratio = to_rate / from_rate
+    if ratio < 1:
+        window = max(1, int(round(1.0 / ratio)))
+        if window > 1:
+            kernel = torch.ones(1, 1, window, dtype=waveform.dtype) / window
+            waveform = torch.nn.functional.conv1d(
+                waveform.unsqueeze(0), kernel, padding=window // 2).squeeze(0)
+    n_out = max(1, int(round(waveform.size(-1) * ratio)))
+    return torch.nn.functional.interpolate(
+        waveform.unsqueeze(0), size=n_out, mode="linear", align_corners=False).squeeze(0)
+
+
+def load_waveform(spec, sample_rate: int = 16000, max_seconds: Optional[float] = None,
+                  normalise: bool = True, allow_url: Optional[bool] = None):
+    """Turn a sound reference into a mono ``[T]`` float32 tensor at `sample_rate`, in [-1, 1].
+
+    A mapping carrying ``waveform`` bypasses decoding entirely -- a tensor ``[T]``/``[C, T]`` or
+    anything array-like -- which is how a caller with its own decoder, and the tests, skip both the
+    codec and the container. Everything else is resolved by :func:`read_audio_bytes` (so the byte
+    and duration caps apply) and decoded by :func:`decode_waveform`.
+
+    Mono is not a convenience. A decision about a sound has to be the same decision whatever channel
+    layout the caller recorded in, and downmixing to mono is what makes the sample count -- and
+    therefore the number of frames the tower sees -- independent of it.
+
+    `normalise` scales the recording to its own peak. The point is gain invariance: the same bark
+    recorded 20 dB quieter must not change the answer, and a tower that sees a normalized waveform
+    does not have to learn loudness as a nuisance. Set it to ``False`` when level *is* the signal
+    ("is this too loud?") and carry the level in the text instead.
+    """
+    torch = _torch()
+    if isinstance(spec, dict) and "waveform" in spec:
+        return _fit_waveform(spec["waveform"], sample_rate, max_seconds, normalise, torch)
+    info = None
+    data = read_audio_bytes(spec, max_seconds=max_seconds, allow_url=allow_url)
+    info = audio_info(data)
+    waveform, rate = decode_waveform(data, info, max_seconds=max_seconds)
+    waveform = resample(waveform, rate, sample_rate)
+    return _finish_waveform(waveform, max_seconds, normalise, torch, sample_rate=sample_rate)
+
+
+def _fit_waveform(waveform, sample_rate: int, max_seconds: Optional[float], normalise: bool,
+                  torch):
+    """Place an already-decoded waveform: shape, dtype, device-free, no resampling guess.
+
+    A caller handing over samples is making a claim about their rate, which is `sample_rate` -- the
+    config's, not something inferred from the shape. Guessing here is how a 44.1 kHz recording ends
+    up sounding a third slower than it is.
+    """
+    if not torch.is_tensor(waveform):
+        waveform = torch.as_tensor(waveform)
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+    if waveform.dim() != 2:
+        raise ValueError("waveform must be [T] or [C, T], got %s" % (tuple(waveform.shape),))
+    return _finish_waveform(waveform.float(), max_seconds, normalise, torch,
+                            sample_rate=sample_rate)
+
+
+def _finish_waveform(waveform, max_seconds: Optional[float], normalise: bool, torch,
+                     sample_rate: Optional[int] = None):
+    if waveform.size(0) > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    elif waveform.size(0) == 0:
+        raise AudioRefused("audio_invalid", "the recording has no channels")
+    waveform = waveform.reshape(-1)
+    if max_seconds and sample_rate:
+        # A reference that is too long has already been refused by `check_audio_bytes`; this is the
+        # cap for the `{"waveform": ...}` path, where there is no header to have refused it.
+        waveform = waveform[:int(max_seconds * sample_rate)]
+    if normalise and waveform.numel():
+        peak = waveform.abs().max()
+        if peak > 0:
+            waveform = waveform / peak
+    return waveform.contiguous()
+
+
+class AudioCache(ContentCache):
+    """Content-addressed cache of the audio block, so one recording is encoded once per call.
+
+    The tower pass is the expensive half of a decision about a sound, and one call that asks several
+    questions about the same recording must not pay it several times. Keyed by a hash of the
+    normalised samples -- two decodes of the same sound are one entry -- with `summary` in the key
+    because it changes the block's width, and bounded so a long-lived server cannot grow without
+    limit.
+    """
+
+    def get_or_encode(self, waveform, encode, summary: bool = False):
+        return super().get_or_encode(waveform, encode, *(("summary",) if summary else ()))
+
+    @staticmethod
+    def key(waveform, summary: bool = False) -> str:
+        """Content key for `waveform`; `summary` is part of it, for the vision path's reason."""
+        return ContentCache.key(waveform, *(("summary",) if summary else ()))
 
 
 # ------------------------------------------------------------------------------------------------

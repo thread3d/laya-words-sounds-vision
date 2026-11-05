@@ -64,3 +64,46 @@ the weights, and a checkpoint that declares audio without it is refused rather t
 ::: laya.audio.describe_plan
 
 ::: laya.block.splice_embeddings
+
+## A sound inside a state
+
+A state carries a sound the way it carries a picture: a reference the caller names, or samples the
+caller already decoded. Decoding is optional — `pip install laya[audio]` adds `soundfile` for a
+compressed container, PCM WAV goes through the standard library either way, and
+`{"waveform": <tensor>}` skips both.
+
+::: laya.audio.load_waveform
+
+::: laya.audio.decode_waveform
+
+::: laya.audio.resample
+
+::: laya.audio.AudioCache
+
+## Transport limits
+
+A recording has two costs, and only one of them is bytes: an hour of 48 kHz stereo is 690 MB decoded
+inside a 12 MB compressed file. Both are answered from the container header, before any decoder
+runs, which is also why they work on an install without the audio extra.
+
+::: laya.audio.MAX_AUDIO_BYTES
+
+::: laya.audio.MAX_AUDIO_SECONDS
+
+A recording is fetched over the network only when the caller asks
+(`read_audio_bytes(..., allow_url=True)`) or when the deployment sets `LAYA_ALLOW_AUDIO_URLS=1`
+(`true`, `yes` and `on` are accepted too). It is off by default for the reason the image path gives:
+a self-hosted engine that fetches whatever URL a request names is an egress proxy pointed at the
+operator's own network, and only `http`/`https` are fetched even when it is on.
+
+::: laya.audio.audio_info
+
+::: laya.audio.check_audio_bytes
+
+::: laya.audio.read_audio_bytes
+
+::: laya.audio.AudioRefused
+
+::: laya.audio.allow_audio_urls
+
+::: laya.transport.read_reference

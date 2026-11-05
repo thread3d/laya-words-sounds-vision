@@ -46,6 +46,8 @@ import numpy as np
 
 from .block import BlockPlan, describe_plan as _describe_block_plan, plan_block, reserved_positions
 from .block import splice_embeddings, SLOTS
+from .cache import ContentCache
+from .transport import Refused, looks_base64, read_reference
 from .projector import PooledProjector, tower_width as _shared_tower_width
 from .projector import truncate_tower as _truncate_tower_shared
 
@@ -535,7 +537,7 @@ def load_pixels(spec, image_size: int = 224):
         # They are *not* base64 text: decoding them as base64 was the earlier reading, and it
         # turned every served image into mojibake that Pillow then refused.
         src = io.BytesIO(spec)
-    elif _looks_base64(spec):
+    elif looks_base64(spec):
         src = io.BytesIO(base64.b64decode(spec))
     else:
         src = spec
@@ -579,15 +581,6 @@ def _to_rgb(im, Image, ImageOps):
     return im
 
 
-def _looks_base64(spec: str) -> bool:
-    if not isinstance(spec, str) or os.path.exists(spec):       # a real path wins over a guess
-        return False
-    stripped = spec.strip()
-    if len(stripped) < 64 or len(stripped) % 4:
-        return False
-    return all(c.isalnum() or c in "+/=\n\r" for c in stripped)
-
-
 def _fit(px, image_size: int):
     torch = _torch()
     if px.dim() == 4:
@@ -609,49 +602,23 @@ def _fit(px, image_size: int):
     return px
 
 
-class VisualCache:
+class VisualCache(ContentCache):
     """Content-addressed cache of the visual block, so one image is encoded once per call.
 
     The spec's §4.6: `predict_batch` already tokenizes a shared state once and reuses the ids
     across every question; the vision pass needs the same treatment and more urgently, because the
     tower is the expensive half. Keyed by a hash of the normalised pixels -- two encodings of the
     same picture are one image -- with a bounded size so a long-lived server cannot grow without
-    limit.
+    limit, and with `summary` in the key because it changes the block's width.
     """
 
-    def __init__(self, max_entries: int = 64):
-        self.max_entries = max(1, int(max_entries))
-        self._store = _ordered_dict()
-        self.hits = 0
-        self.misses = 0
+    def get_or_encode(self, pixels, encode, summary: bool = False):
+        return super().get_or_encode(pixels, encode, *(("summary",) if summary else ()))
 
     @staticmethod
     def key(pixels, summary: bool = False) -> str:
         """Content key for `pixels`; `summary` is part of it, because it changes the block's width."""
-        import hashlib
-        digest = hashlib.sha256(pixels.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
-        return digest + ("|summary" if summary else "")
-
-    def get_or_encode(self, pixels, encode, summary: bool = False):
-        k = self.key(pixels, summary)
-        if k in self._store:
-            self.hits += 1
-            self._store.move_to_end(k)
-            return self._store[k]
-        self.misses += 1
-        value = encode(pixels)
-        self._store[k] = value
-        while len(self._store) > self.max_entries:
-            self._store.popitem(last=False)
-        return value
-
-    def clear(self):
-        self._store.clear()
-
-
-def _ordered_dict():
-    from collections import OrderedDict
-    return OrderedDict()
+        return ContentCache.key(pixels, *(("summary",) if summary else ()))
 
 
 def collate_visual(items, embed_fn, pad_id: int = 0):
@@ -762,13 +729,15 @@ MAX_IMAGE_BYTES = 12 * 1024 * 1024        # 12 MB, override with LAYA_MAX_IMAGE_
 MAX_IMAGE_PIXELS = 4096 * 4096            # ~16.8 MP, override with LAYA_MAX_IMAGE_PIXELS
 
 
-class ImageRefused(ValueError):
-    """A refused image, carrying the reason a caller should be told."""
+class ImageRefused(Refused):
+    """A refused image, carrying the reason a caller should be told.
+
+    The reading policy itself is shared with the sound path (`laya.transport`); this class only
+    keeps the image path's name and reason codes for it.
+    """
 
     def __init__(self, reason: str, detail: str):
-        super().__init__("%s: %s" % (reason, detail))
-        self.reason = reason
-        self.detail = detail
+        super().__init__("image", reason, detail)
 
 
 def image_info(data) -> Optional[Dict[str, Any]]:
@@ -869,109 +838,23 @@ def read_image_bytes(spec, max_bytes: Optional[int] = None, max_pixels: Optional
     """Resolve an image reference into raw bytes, applying the transport limits.
 
     Accepted forms: raw ``bytes`` (already read), a filesystem ``path``, a base64 string, or --
-    only when `allow_url` is set -- an ``http(s)`` URL.
+    only when `allow_url` is set -- an ``http(s)`` URL. The reading policy is shared with the sound
+    path (:func:`laya.transport.read_reference`); this function adds the image checks, which are
+    about the *header* and happen before any decoder runs.
 
     **URLs are off by default and that is not an oversight.** A self-hosted decision engine that
     fetches whatever URL a request names is a server-side request forgery primitive pointed at the
     operator's own network: ``http://169.254.169.254/`` and ``http://localhost:9200/`` are one
     request away. A deployment that wants it opts in and puts its own egress policy in front.
     """
-    import base64
-    from urllib.parse import urlparse
+    def refuse(reason: str, detail: str):
+        raise ImageRefused(reason, detail)
 
-    if isinstance(spec, (bytes, bytearray)):
-        data = bytes(spec)
-    elif isinstance(spec, dict):
-        if "bytes" in spec:
-            data = spec["bytes"]
-        elif "path" in spec:
-            data = _read_path(spec["path"], max_bytes)
-        elif "url" in spec:
-            data = _read_url(spec["url"], max_bytes, allow_url, timeout, urlparse)
-        elif "base64" in spec:
-            data = _decode_base64(spec["base64"], max_bytes, base64)
-        else:
-            raise ImageRefused("image",
-                               "a mapping must carry one of bytes, path, url or base64; got %s"
-                               % ", ".join(sorted(spec)))
-    elif isinstance(spec, str):
-        if spec.startswith(("http://", "https://")):
-            data = _read_url(spec, max_bytes, allow_url, timeout, urlparse)
-        elif os.path.exists(spec):
-            data = _read_path(spec, max_bytes)
-        else:
-            data = _decode_base64(spec, max_bytes, base64)
-    else:
-        raise ImageRefused("image", "expected bytes, a path, a URL or base64; got %s"
-                           % type(spec).__name__)
+    data = read_reference(spec, kind="image",
+                          max_bytes=MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes),
+                          allow_url=allow_url, url_env="LAYA_ALLOW_IMAGE_URLS",
+                          timeout=timeout, refuse=refuse)
     check_image_bytes(data, max_bytes=max_bytes, max_pixels=max_pixels)
-    return data
-
-
-def _read_path(path, max_bytes) -> bytes:
-    if not isinstance(path, str):
-        raise ImageRefused("image", "path must be a string, got %s" % type(path).__name__)
-    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
-    try:
-        size = os.path.getsize(path)
-    except OSError as exc:
-        raise ImageRefused("image_unreadable", "%s: %s" % (path, exc.strerror or exc)) from exc
-    if size > limit:
-        raise ImageRefused("image_too_large",
-                           "%s is %d bytes, over the %d-byte limit" % (path, size, limit))
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(limit + 1)
-    except OSError as exc:
-        raise ImageRefused("image_unreadable", "%s: %s" % (path, exc.strerror or exc)) from exc
-
-
-def _decode_base64(text, max_bytes, base64) -> bytes:
-    if not isinstance(text, str):
-        raise ImageRefused("image", "base64 must be a string, got %s" % type(text).__name__)
-    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
-    # A base64 string is 4/3 the size of what it decodes to, so the encoded length is already a
-    # lower bound on the work; refusing here avoids materialising a huge buffer to measure it.
-    if len(text) > (limit // 3 + 1) * 4:
-        raise ImageRefused("image_too_large",
-                           "the encoded image is longer than a %d-byte image can be" % limit)
-    try:
-        return base64.b64decode(text, validate=True)
-    except Exception as exc:                                     # noqa: BLE001 - any decode error
-        raise ImageRefused("image_invalid", "base64 did not decode: %s" % exc) from exc
-
-
-def _read_url(url, max_bytes, allow_url, timeout, urlparse) -> bytes:
-    if not allow_url:
-        raise ImageRefused(
-            "image_url_disabled",
-            "fetching an image over the network is off by default; set LAYA_ALLOW_IMAGE_URLS=1 "
-            "to enable it, or send the bytes")
-    if not isinstance(url, str):
-        raise ImageRefused("image", "url must be a string, got %s" % type(url).__name__)
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ImageRefused("image_url_scheme",
-                           "only http and https are fetched, got %r" % (parsed.scheme,))
-    if not parsed.hostname:
-        raise ImageRefused("image_url_invalid", "no host in %r" % (url,))
-    limit = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
-    import urllib.request
-    request = urllib.request.Request(url, headers={"User-Agent": "laya-image-fetch"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:   # noqa: S310 - opt-in
-            declared = response.headers.get("Content-Length")
-            if declared is not None and int(declared) > limit:
-                raise ImageRefused("image_too_large",
-                                   "the server declares %s bytes, over the %d-byte limit"
-                                   % (declared, limit))
-            data = response.read(limit + 1)
-    except ImageRefused:
-        raise
-    except Exception as exc:                                     # noqa: BLE001 - network errors
-        raise ImageRefused("image_unreachable", "%s: %s" % (url, exc)) from exc
-    if len(data) > limit:
-        raise ImageRefused("image_too_large", "%s returned more than %d bytes" % (url, limit))
     return data
 
 
