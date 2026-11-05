@@ -34,17 +34,18 @@ through `laya eval`:
 laya eval --help
 ```
 
-Two of its subcommands are vision gates rather than accuracy scores: `laya-evals ablate` removes
-the image and requires the accuracy to fall, and `laya-evals flip` permutes the options and requires
-the answer not to move.
+Two of its subcommands are media gates rather than accuracy scores: `laya-evals ablate` removes the
+picture (or, with `--modality audio`, the recording) and requires the accuracy to fall, and
+`laya-evals flip` permutes the options and requires the answer not to move.
 
 ```bash
 laya-evals ablate eval.jsonl --model ./my-vision-checkpoint --min-gain 0.35
+laya-evals ablate eval.jsonl --model ./my-audio-checkpoint --modality audio --min-gain 0.35
 laya-evals flip   eval.jsonl --model ./my-vision-checkpoint --max-flip-rate 0.02
 ```
 
 See the [Evaluation harness](evals.md) guide for datasets, metrics, and baseline gates, and
-[vision gates](evals.md#vision-gates-does-it-actually-look-at-the-image) for those two.
+[media gates](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording) for those two.
 
 ### Training CLI
 

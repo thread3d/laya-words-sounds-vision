@@ -621,18 +621,24 @@ name a commit for a checkpoint given as a local directory: `Agent.revision` and 
 both stay `None` when nothing was downloaded (`laya/agent.py:574`, `laya/onnx_agent.py:107`), so that
 entry is recorded as `null` rather than dropped.
 
-## Vision gates: does it actually look at the image?
+## Media gates: does it actually look at the picture, or listen to the recording?
 
 Two subcommands answer the questions an accuracy score cannot. Both run the same dataset twice and
 compare the two passes; both are the gates in `docs/vision-decision-system.md` §9.1 and §9.2b.
 
-### `ablate` — vision necessity
+### `ablate` — input necessity, for a picture or a sound
 
 ```
 laya-evals ablate vision.jsonl --min-gain 0.35 --json report.json
+laya-evals ablate sounds.jsonl --modality audio --min-gain 0.35 --json report.json
 ```
 
-Every row whose `state` carries an image is answered twice: as given, and with the image removed.
+`--modality` is `image` (the default, and the original form of this gate) or `audio`. Both are the
+same measurement through `laya.evals_media.ablation`, so a vision report and a sound report are
+comparable numbers produced by the same arithmetic; the report's `gate` field says which one ran
+(`vision-necessity` / `audio-necessity`).
+
+Every row whose `state` carries the input is answered twice: as given, and with it removed.
 The report gives accuracy on both sides per tag slice and the drop between them. `--min-gain X`
 makes it a verdict — the run exits non-zero unless accuracy falls by at least `X` when the pixels
 are taken away.
@@ -652,9 +658,11 @@ nothing to remove, and including them would dilute the number toward zero. The p
 required to be a no-op on those rows: if a text row's answer moves, the pass itself is not
 deterministic, every other number in the report is noise, and `text_only_unchanged` goes false.
 
-An image-only state is stripped to an empty string rather than to `{}`, since an empty object is
+An input-only state is stripped to an empty string rather than to `{}`, since an empty object is
 still a document to serialize and the model would be asked the question against text it was never
-meant to see.
+meant to see. For `--modality audio`, every sound key is stripped (`audio`, `audio_path`,
+`audio_base64`, `audio_waveform`) and a vision checkpoint's rows are untouched, so the same dataset
+can be scored against either kind of checkpoint.
 
 ### `flip` — option-order invariance
 
@@ -665,7 +673,7 @@ laya-evals flip vision.jsonl --seed 0 --max-flip-rate 0.02 --json report.json
 Every choice question is answered twice, the second time with its options permuted. The report
 gives the flip rate overall and per tag. `--max-flip-rate X` makes it a verdict.
 
-This catches a model that scores options *against each other* instead of against the image: its
+This catches a model that scores options *against each other* instead of against the input: its
 answer follows position, so a caller who reorders a list — which carries no information — gets a
 different decision. The published figure for joint candidate encoding is 8–10%.
 

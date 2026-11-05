@@ -291,7 +291,7 @@ laya-evals flip   eval.jsonl --model ./my-vision-checkpoint --max-flip-rate 0.02
 `ablate` removes the image and requires accuracy to fall by at least the given margin — that is
 what catches a fusion layer that learned to answer from the text and treat the picture as
 decoration. `flip` permutes the option list and requires the answer not to move. Both are
-described in [the evaluation harness](evals.md#vision-gates-does-it-actually-look-at-the-image).
+described in [the evaluation harness](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording).
 
 ## Sounds: teaching a checkpoint to listen
 
@@ -322,9 +322,12 @@ projector file (`audio.safetensors`) and the before/after table applies here unc
 **What is not measured yet.** The vision numbers above come from a published CIFAR-100 run; there is
 no equivalent audio benchmark in this repository yet, so this page states no accuracy figure for a
 sound checkpoint. The gate that matters is the same one — accuracy with the recording removed must
-fall, or the "audio" checkpoint is a text model with an expensive tower — and `laya-evals ablate`
-removes an *image* today. Until it knows about sounds, measure the ablation with an eval file whose
-states carry no `audio` key and compare the two accuracies yourself.
+fall, or the "audio" checkpoint is a text model with an expensive tower. `laya-evals ablate
+--modality audio` does exactly that:
+
+```bash
+laya-evals ablate eval.jsonl --model ./my-audio-checkpoint --modality audio --min-gain 0.35
+```
 
 ## Fine-tuning from Python
 

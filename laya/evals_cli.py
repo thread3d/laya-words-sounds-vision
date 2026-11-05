@@ -271,12 +271,16 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="apply opt-in per-slice quality rules from a JSON policy")
     ablate = sub.add_parser(
         "ablate",
-        help="gate 1: re-answer every row with its image removed, and report the accuracy lost")
-    ablate.add_argument("dataset", help="JSONL file whose rows carry an image in their state")
+        help="gate 1: re-answer every row with its input removed, and report the accuracy lost")
+    ablate.add_argument("dataset",
+                        help="JSONL file whose rows carry an image (or a sound) in their state")
     ablate.add_argument("--model", help="force a checkpoint instead of auto-routing")
     ablate.add_argument("--device", help="torch device, e.g. cpu or cuda")
+    ablate.add_argument("--modality", choices=("image", "audio"), default="image",
+                        help="which input to remove: 'image' (the default, and the original "
+                             "form of this gate) or 'audio' (a recording)")
     ablate.add_argument("--min-gain", type=float, metavar="X",
-                        help="fail unless accuracy drops by at least X when the image is removed "
+                        help="fail unless accuracy drops by at least X when the input is removed "
                              "(the spec's gate for an image-required family is 0.35)")
     ablate.add_argument("--json", metavar="PATH", help="write the report as JSON")
 
@@ -422,7 +426,17 @@ def _gate_exit(report) -> int:
 
 
 def _cmd_ablate(args) -> int:
-    """`laya-evals ablate` -- the vision-necessity gate (spec §9.1)."""
+    """`laya-evals ablate` -- the input-necessity gate (spec §9.1), for a picture or a sound."""
+    if getattr(args, "modality", "image") == "audio":
+        from .evals_audio import audio_ablation
+
+        dataset = evals.Dataset.from_jsonl(args.dataset)
+        report = audio_ablation(_load_runner(args), dataset, min_gain=args.min_gain)
+        _emit(report, args.json)
+        if report["rows_with_audio"] == 0:
+            print("no row carries a sound; nothing to ablate", file=sys.stderr)
+            return 1
+        return _gate_exit(report)
     from .evals_vision import image_ablation
 
     dataset = evals.Dataset.from_jsonl(args.dataset)

@@ -22,9 +22,10 @@ the two passes differ in padding and numerics, and a gate whose two halves are n
 comparable is not a gate.
 """
 import random
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional
 
-from .evals import Dataset, EvalError, Example, _correct
+from .evals import Dataset
+from .evals_media import ablation, ask as _ask
 from .vision import IMAGE_KEYS
 
 # The two passes a gate compares. Named so a report says which side a number came from.
@@ -49,47 +50,6 @@ def strip_image(state: Any) -> Any:
     return rest if rest else ""
 
 
-def _ask(runner, state: Any, questions: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
-    """One example's answers, in the one shape the runners agree on."""
-    kwargs = {"model": model} if model is not None else {}
-    try:
-        result = runner.predict(state, questions, **kwargs)
-    except TypeError as exc:                            # a runner whose predict takes no `model`
-        if "model" not in kwargs or "model" not in str(exc):
-            raise
-        result = runner.predict(state, questions)
-    answers = (result or {}).get("answers")
-    if not isinstance(answers, dict):
-        raise EvalError("runner.predict returned no 'answers' object")
-    return answers
-
-
-def _accuracy(examples: Sequence[Example], answers: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Fraction of questions answered, and the fraction of those answered correctly."""
-    asked = correct = 0
-    for example, got in zip(examples, answers):
-        for qid, expected in example.expected.items():
-            answer = got.get(qid)
-            if not isinstance(answer, dict):
-                continue
-            verdict = _correct(answer, expected)
-            if verdict is None:
-                continue
-            asked += 1
-            correct += int(bool(verdict))
-    return {"questions": asked, "correct": correct,
-            "accuracy": (correct / asked) if asked else None}
-
-
-def _slices(examples: Sequence[Example]) -> Dict[str, List[int]]:
-    """Indices per tag, with an `all` slice so a report always has a headline number."""
-    out: Dict[str, List[int]] = {"all": list(range(len(examples)))}
-    for index, example in enumerate(examples):
-        for tag in example.tags:
-            out.setdefault(str(tag), []).append(index)
-    return out
-
-
 def image_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None,
                    min_text_change: float = 0.01) -> Dict[str, Any]:
     """Gate 1: how much of the accuracy depends on the image actually being there.
@@ -106,62 +66,12 @@ def image_ablation(runner, dataset: Dataset, *, min_gain: Optional[float] = None
     `min_text_change` is the companion check -- a text-only row must be answered the same with and
     without the ablation, because the ablation is a no-op for it. A row that moves anyway means the
     pass itself is non-deterministic, and every other number in the report is then noise.
+
+    The measurement is `laya.evals_media.ablation`, shared with the sound gate, so the two
+    modalities' numbers are produced by the same arithmetic.
     """
-    with_images: List[Example] = []
-    without_images: List[Example] = []
-    stripped: List[Example] = []
-    for example in dataset.examples:
-        if _has_image(example.state):
-            with_images.append(example)
-            stripped.append(Example(state=strip_image(example.state), questions=example.questions,
-                                    expected=example.expected, tags=example.tags,
-                                    language=example.language, model=example.model))
-        else:
-            without_images.append(example)
-
-    answers_with = [_ask(runner, ex.state, ex.questions, ex.model) for ex in with_images]
-    answers_without = [_ask(runner, ex.state, ex.questions, ex.model) for ex in stripped]
-
-    slices_with = _slices(with_images)
-    per_tag: Dict[str, Any] = {}
-    for tag, indices in slices_with.items():
-        a = _accuracy([with_images[i] for i in indices], [answers_with[i] for i in indices])
-        b = _accuracy([with_images[i] for i in indices], [answers_without[i] for i in indices])
-        per_tag[tag] = {
-            "with_image": a["accuracy"],
-            "without_image": b["accuracy"],
-            "questions": a["questions"],
-            "gain": (a["accuracy"] - b["accuracy"])
-            if a["accuracy"] is not None and b["accuracy"] is not None else None,
-        }
-
-    # The pass must be a no-op on rows that carry no image.
-    text_answers = [_ask(runner, ex.state, ex.questions, ex.model) for ex in without_images]
-    text_moved = 0
-    for example, first in zip(without_images, text_answers):
-        second = _ask(runner, strip_image(example.state), example.questions, example.model)
-        if first != second:
-            text_moved += 1
-    text_change = (text_moved / len(without_images)) if without_images else 0.0
-
-    headline = per_tag["all"]["gain"]
-    report: Dict[str, Any] = {
-        "gate": "vision-necessity",
-        "rows_with_image": len(with_images),
-        "rows_text_only": len(without_images),
-        "per_tag": per_tag,
-        "gain": headline,
-        "text_only_unchanged": text_change <= min_text_change,
-        "text_only_change_rate": text_change,
-        # Always present, so a caller can branch on it without first asking whether a threshold
-        # was set: None means "reported, not judged".
-        "passed": None,
-    }
-    if min_gain is not None:
-        report["min_gain"] = float(min_gain)
-        report["passed"] = bool(headline is not None and headline >= min_gain
-                                and text_change <= min_text_change)
-    return report
+    return ablation(runner, dataset, gate="vision-necessity", noun="image", keys=IMAGE_KEYS,
+                    min_gain=min_gain, min_text_change=min_text_change)
 
 
 # ------------------------------------------------------------------------------------------------
