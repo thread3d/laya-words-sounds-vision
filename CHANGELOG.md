@@ -6,6 +6,24 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [2.1.7] - 2026-11-05
+
+The tower table completed, and two overclaims in it corrected.
+
+### Added
+
+- The ESC-10 column for all three towers (scored from the same cached frames): `wav2vec2-base`
+  0.7300, `base-960h` 0.6425, `large-960h-lv60-self` **0.8425**, and a decision rule for which tower
+  to run for which kind of decision.
+
+### Fixed
+
+- Two claims in the same section that did not survive their own numbers. `wav2vec2-large` at 0.6280
+  on ESC-50 was written up as beating "every published frozen probe"; it beats Whisper (52.8) and
+  Dasheng (54.8) and sits **below** BEATs (72.7 / 83.2) and BYOL-A (83.2), whose towers were
+  pre-trained on AudioSet. And 0.8425 was implied to clear the 81.3 % human baseline — that baseline
+  is 50-way, and an ESC-10 number is not comparable with it. Both now say what they measure.
+
 ## [2.1.6] - 2026-11-05
 
 Which frozen tower to run — measured, not assumed.

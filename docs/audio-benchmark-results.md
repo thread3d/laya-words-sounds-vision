@@ -75,19 +75,25 @@ Two facts fall out of that table, and they set the bar for the engine:
 
 Same rows, same probe, three frozen towers. `AUDIO_BENCH_TOWER=<hf id> python3 .../probe.py`:
 
-| tower | parameters | ESC-50 ridge (mean) | ESC-10 ridge (mean+std) |
-|---|---|---|---|
-| `facebook/wav2vec2-base` (self-supervised, **the shipped default**) | 94 M | 0.5265 ± 0.0368 | 0.7300 ± 0.0292 |
-| `facebook/wav2vec2-base-960h` (the same network, ASR-finetuned) | 94 M | 0.3805 ± 0.0184 | — |
-| `facebook/wav2vec2-large-960h-lv60-self` (ASR, large) | 317 M | **0.6280 ± 0.0157** | — |
+| tower | parameters | ESC-50 ridge (mean) | ESC-10 ridge (mean+std) | FSDD ridge (mean) |
+|---|---|---|---|---|
+| `facebook/wav2vec2-base` (self-supervised, **the shipped default**) | 94 M | 0.5265 ± 0.0368 | 0.7300 ± 0.0292 | 0.7950 |
+| `facebook/wav2vec2-base-960h` (the same network, ASR-finetuned) | 94 M | 0.3805 ± 0.0184 | 0.6425 ± 0.0430 | — |
+| `facebook/wav2vec2-large-960h-lv60-self` (ASR, large) | 317 M | **0.6280 ± 0.0157** | **0.8425 ± 0.0281** | **0.9750** |
 
-Same three towers on the two datasets make the rule sharper — and FSDD is where ASR training wins,
-because what is being decided *is* speech:
+The rule the three datasets give together:
 
-| tower | FSDD ridge (mean) | FSDD centroid |
-|---|---|---|
-| `wav2vec2-base` (self-supervised, shipped default) | 0.7950 | 0.5330 |
-| `wav2vec2-large-960h-lv60-self` (ASR, large) | **0.9750** | 0.7960 |
+| what is being decided | run |
+|---|---|
+| environmental sound (ESC-50, ESC-10) | a **self-supervised** tower; large if you can afford the forward pass, base otherwise |
+| anything about speech content (digits, commands, intent) | an **ASR-finetuned** tower, large for preference |
+| a small budget, one tower for both | `wav2vec2-base` — never the ASR variant of the same size for environmental audio |
+
+Two caveats, because cardinality is not a detail: 0.8425 is the 10-class subset and is **not**
+comparable with the 50-way figures above (the 81.3 % human baseline is a 50-way number, and humans do
+far better than that on ten classes). And 0.9750 on spoken digits comes from a task whose classes are
+acoustic identities the ASR tower was trained *towards*, so it measures fit to the tower's own
+pre-training as much as anything about speech recognition in general.
 
 Two findings, both worth acting on:
 
@@ -100,10 +106,11 @@ Two findings, both worth acting on:
   self-supervised checkpoint (0.5265 against 0.3805 for its ASR sibling); spoken digits prefer the
   ASR one, by a wide margin (0.9750 against 0.7950) — and 0.9750 is inside the range published
   fine-tuned digit classifiers report. A "sound" decision is not one tower's job.
-* **Size is worth more than the head.** `wav2vec2-large` at 0.6280 is ten points above `base` and
-  above every frozen-probe number in the published table below (Whisper 52.8, Dasheng 54.8) — with
-  the same 768-number feature and the same closed-form head. A frozen tower is a choice, and this
-  table is how to make it.
+* **Size is worth more than the head.** `wav2vec2-large` at 0.6280 is ten points above `base`, with
+  the same feature and the same closed-form head. It sits between the published frozen probes:
+  above Whisper (52.8) and Dasheng (54.8), below BEATs (72.7 frozen, 83.2 multi-head) and BYOL-A
+  (83.2) — models pre-trained on AudioSet, which is the pre-training difference this engine does not
+  buy. Within the towers available here, the ordering is all tower and no head.
 
 ## 3. Where that sits against the field
 
