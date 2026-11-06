@@ -55,12 +55,14 @@ jobs:
   deploy:
     name: docs (deploy)
     needs: build
-    # Pages is configured on the canonical repository and on this fork (thread3d/laya), which
-    # publishes its own docs at https://thread3d.github.io/laya/. Other forks still skip: with no
-    # Pages site a deploy would 404 and go red on every push to main, while the strict build above
-    # still runs there, so the docs are checked everywhere and published in the two configured
-    # places.
-    if: github.event_name != 'pull_request' && (github.repository == 'NandhaKishorM/laya' || github.repository == 'thread3d/laya')
+    # Deploy only where Pages is configured, as a switch rather than a list of repository names.
+    # The list was `NandhaKishorM/laya` and `thread3d/laya`; neither is this repository, so the job
+    # had silently not run since the move, while the workflow still read as if it deployed. A
+    # variable also survives the next rename, and a fork that has not enabled Pages leaves it unset
+    # and skips -- which is the intent the old list was reaching for.
+    #
+    # Settings -> Pages -> Source: GitHub Actions, then:  gh variable set LAYA_PAGES --body true
+    if: github.event_name != 'pull_request' && vars.LAYA_PAGES == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

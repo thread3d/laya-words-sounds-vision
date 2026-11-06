@@ -673,14 +673,23 @@ def _headings(path):
     return found
 
 
+# Directories a local run leaves behind. None of them is the repository, and one of them is not
+# harmless: `cmake --preset debug` in laya-cpp/ fetches googletest, whose own docs/*.md then arrived
+# in the sweeps below as if they were ours -- 140 anchors that match no heading here, reported as this
+# repository's problem. `.pytest_cache` ships a README, `.venv` is where CONTRIBUTING says to install,
+# and `.hf-cache` holds dataset cards downloaded by setup_laya.sh.
+_LOCAL_OUTPUTS = (".git", "__pycache__", "node_modules", ".pytest_cache", ".venv", ".hf-cache",
+                  "build", "dist", "target", "site", "onnx", "onnx-split")
+
+
+def _prune(dirnames):
+    """Keep a walk over this repository out of a local build tree (see _LOCAL_OUTPUTS)."""
+    dirnames[:] = [d for d in dirnames if d not in _LOCAL_OUTPUTS]
+
+
 _md = []
 for _dirpath, _dirnames, _filenames in os.walk("."):
-    # `.pytest_cache` ships a README of its own and `.venv` is where CONTRIBUTING tells
-    # contributors to install; neither is part of the repository. `.hf-cache` holds
-    # third-party dataset cards downloaded by setup_laya.sh (gitignored).
-    _dirnames[:] = [d for d in _dirnames
-                    if d not in (".git", "__pycache__", "node_modules", ".pytest_cache",
-                                 ".venv", ".hf-cache")]
+    _prune(_dirnames)
     _md.extend(os.path.normpath(os.path.join(_dirpath, f))
                for f in _filenames if f.endswith(".md"))
 _md = sorted(_md)
@@ -1096,9 +1105,8 @@ _extra_section = pyproject.split("[project.optional-dependencies]")[1].split("\n
 _declared_extras = set(re.findall(r"^([a-z][\w-]*)\s*=\s*\[", _extra_section, re.M))
 _referenced_extras = {}
 for _dirpath, _dirnames, _filenames in os.walk("."):
-    # `.venv` is where CONTRIBUTING tells contributors to install, and it is not the repository.
-    _dirnames[:] = [d for d in _dirnames
-                    if d not in (".git", "__pycache__", "node_modules", ".pytest_cache", ".venv")]
+    # Same pruning as the markdown sweep above: a build tree is not the repository.
+    _prune(_dirnames)
     for _f in _filenames:
         if not _f.endswith((".py", ".md", ".yml", ".toml")):
             continue
@@ -1257,6 +1265,19 @@ def test_guard_skips_when_repo_files_missing(tmp_path, monkeypatch):
 
 require_repo("pyproject.toml")
 _prove_guard_skips_when_files_missing()
+
+# The walks above run at import, so they are checked here by running the same pruning over a tree
+# shaped like a local build: a decoy under `build/_deps/` must not be seen at all.
+with tempfile.TemporaryDirectory() as _tmp:
+    _decoy = os.path.join(_tmp, "laya-cpp", "build", "_deps", "googletest-src", "docs")
+    os.makedirs(_decoy)
+    with open(os.path.join(_decoy, "advanced.md"), "w", encoding="utf-8") as _handle:
+        _handle.write("# decoy\n\n[jump](nowhere.md#no-such-heading)\n")
+    _seen = []
+    for _dirpath, _dirnames, _filenames in os.walk(_tmp):
+        _prune(_dirnames)
+        _seen.extend(f for f in _filenames if f.endswith(".md"))
+    check("repo/walks skip a local build tree", _seen, [])
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 for f in FAIL:

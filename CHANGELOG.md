@@ -6,6 +6,30 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.10] - 2026-11-06
+
+**No package code changes.** Item 7, part one: two defects that were silent, and are now loud.
+
+**The docs deploy had not run since the repository was renamed.** `docs.yml`'s deploy job was
+conditioned on `github.repository == 'NandhaKishorM/laya' || github.repository == 'thread3d/laya'`,
+and this repository is `thread3d/laya-words-sounds-vision` — so the job had been skipping on every
+push while the workflow, and the page describing it, read as if the site were being published. It is
+now a switch rather than a list: `vars.LAYA_PAGES == 'true'`, set where Pages is actually enabled
+(`gh variable set LAYA_PAGES --body true`). A variable survives the next rename, and a fork that has
+not enabled Pages leaves it unset and skips — which is what the list was trying to express.
+
+**A local `cmake` build broke the packaging suite.** `tests/test_packaging.py` walks the working tree
+for markdown, and `cmake --preset debug` in `laya-cpp/` fetches googletest, whose own `docs/*.md` then
+arrived in the sweep as if they were this repository's: 140 anchors that match no heading here. Both
+walks now share one pruning function that skips the directories a local run leaves behind (`build`,
+`dist`, `target`, `site`, `onnx`, `onnx-split`, and the caches it already skipped), and a new check
+runs that pruning over a decoy tree shaped like the failure — removing `build` from the list makes it
+fail, so it is not a formality.
+
+Both were found by a local build, which is the point: the gates that only run on a runner cannot see
+a tree a contributor has dirtied.
+
+
 ## [4.0.9] - 2026-11-06
 
 **No package code changes.** Item 6: the performance harness runs on a schedule, and its output is an

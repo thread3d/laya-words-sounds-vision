@@ -19,7 +19,7 @@ breadth has to run somewhere other than the commit path.
 
 | tier | fires on | lanes |
 |---|---|---|
-| **blocking (push)** | every push to `main` | `ci.yml` one cell per matrix — `lint`, `test` (3.11), `build`, `typescript` (node 22), `python-sdk` (ubuntu, 3.11), `feishu-benchmark`; `docker.yml` x86 smoke + HTTP; `security.yml` secret scan, unsafe-deserialization check, CodeQL (python); `docs.yml` build + deploy |
+| **blocking (push)** | every push to `main` | `ci.yml` one cell per matrix — `lint`, `test` (3.11), `build`, `typescript` (node 22), `python-sdk` (ubuntu, 3.11), `feishu-benchmark`; `docker.yml` x86 smoke + HTTP; `security.yml` secret scan, unsafe-deserialization check, CodeQL (python); `docs.yml` strict build (deploy only where `vars.LAYA_PAGES` is set) |
 | **breadth (pull request, weekly, dispatch)** | `pull_request`, the Monday crons, `workflow_dispatch` | the whole `ci.yml` matrix (4 Pythons, both Node versions, Windows, the SDK integration and TypeScript-SDK lanes, ONNX export, evals), both Docker runners, all four CodeQL languages, dependency CVEs |
 | **blocking (release)** | a `v*` tag | `release.yml` — the same suite list, then build, `twine check`, PyPI, GitHub Release |
 | **weekly report** | Monday 05:00 UTC (`ci.yml`), 05:30 (`docker.yml`), 03:00 (`evals.yml`), 04:00 (`cpp`, `dotnet`, `go`, `java`, `rust`), 06:17 (`security.yml`) | the full gate on a fresh tree, the five port lanes, the CVE re-scan, the eval baseline |
@@ -27,7 +27,16 @@ breadth has to run somewhere other than the commit path.
 
 A push therefore runs the fast gate (13 jobs); a pull request, a dispatch or the Monday cron runs the
 full one (32–65). `docs.yml` runs its strict build on pushes to `main` and on pull requests that
-touch docs, `laya/`, or the site config; the deploy job publishes only from `main`.
+touch docs, `laya/`, or the site config. Its deploy job publishes only from `main` **and only where
+Pages is configured**, which is a repository variable rather than a condition on the repository name:
+
+```bash
+gh variable set LAYA_PAGES --body true     # Settings -> Pages -> Source: GitHub Actions
+```
+
+That switch replaced a list naming two repositories, neither of which was this one — so the deploy had
+silently not run since the rename while the workflow still read as if it did. A fork that has not
+enabled Pages leaves the variable unset and skips, which is what the list was reaching for.
 
 Two consequences worth knowing:
 
