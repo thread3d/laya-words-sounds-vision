@@ -193,6 +193,29 @@ def non_markdown_names() -> Dict[str, Set[str]]:
     return found
 
 
+def repository_variable_names() -> Dict[str, Set[str]]:
+    """``LAYA_*`` names read as GitHub Actions repository variables (``vars.LAYA_X``).
+
+    ``.github`` sits in ``SKIP_DIRS`` for the sweep above, and that is right: a workflow file is
+    mostly shell and prose, so counting every occurrence would let a mention in a comment stand in
+    for a consumer. A ``vars.`` reference is not a mention -- it is Actions reading the string, the
+    repository-level sibling of ``os.environ.get`` -- so those are collected here instead.
+
+    ``LAYA_PAGES`` is what found this. `docs/ci.md` documents it (``gh variable set LAYA_PAGES
+    --body true``) and `.github/workflows/docs.yml` gates the deploy on ``vars.LAYA_PAGES ==
+    'true'``, but the markdown-only view saw a variable wired to nothing and failed direction 2
+    below. Only the ``vars.`` form is matched; ``secrets.``/``env.`` in a workflow are not a
+    consumption path this suite can vouch for.
+    """
+    found: Dict[str, Set[str]] = {}
+    for path in walk(ROOT, ".github", "workflows"):
+        if not path.endswith((".yml", ".yaml")):
+            continue
+        for name in re.findall(r"\bvars\.(LAYA_[A-Z0-9_]+)\b", read(path)):
+            found.setdefault(name, set()).add(os.path.relpath(path, ROOT).replace(os.sep, "/"))
+    return found
+
+
 def amp_accepted(var: str) -> Set[str]:
     """The spellings laya/agent.py compares `var` against, read out of the comparisons themselves.
 
@@ -580,6 +603,10 @@ def main() -> int:
     pkg = package_names()
     docs = markdown_names()
     tree = non_markdown_names()
+    # A repository variable is consumed outside the tree sweep's reach (`.github` is skipped
+    # there on purpose -- see `repository_variable_names`), so it joins the consumer map here.
+    for name, where in repository_variable_names().items():
+        tree.setdefault(name, set()).update(where)
 
     # ------------------------------------------------- the capture itself has to be working
     # If the walk or the parser silently found nothing, every check below would pass vacuously.
