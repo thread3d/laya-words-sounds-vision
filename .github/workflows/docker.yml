@@ -155,11 +155,13 @@ jobs:
           # in security.yml looks for, and these two strings are test values, not credentials.
           FILE_KEY=from-a-mounted-file
           printf '%s\n' "$FILE_KEY" > "$RUNNER_TEMP/secrets/laya_api_key"
-          # LAYA_API_KEY= keeps the job's inline key away from this service, so the mounted file
+          # LAYA_API_KEY='' keeps the job's inline key away from this service, so the mounted file
           # is the only thing that can authenticate it. LAYA_PORT moves both the published and the
           # bound port off the one the service above is holding, from the one variable the docs
-          # say controls both.
-          LAYA_API_KEY= LAYA_PORT=8100 docker compose run -d --name laya-file-key \
+          # say controls both. The quotes are not decoration: written as a bare `LAYA_API_KEY= `,
+          # the linter reads the following space as a likely `VAR= value` mistake (SC1007) and
+          # fails the file, which actionlint surfaces. An empty value is the intent here.
+          LAYA_API_KEY='' LAYA_PORT=8100 docker compose run -d --name laya-file-key \
             --volume "$RUNNER_TEMP/secrets/laya_api_key:/run/secrets/laya_api_key:ro" \
             -e LAYA_API_KEY_FILE=/run/secrets/laya_api_key \
             --service-ports laya-serve >/dev/null
