@@ -12,8 +12,9 @@ name: Java
 
 on:
   # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
-  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
-  # goldens from the Python package. See docs/ci.md.
+  # nothing it reports can block a pull request or a release. Each cell records the fixture families
+  # it owns, and the three sets are disjoint -- no family is recorded twice, which is what
+  # tests/test_ci_record_once.py checks. See docs/ci.md.
   schedule:
     - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:

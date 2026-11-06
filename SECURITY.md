@@ -84,8 +84,12 @@ When deploying Laya in production environments (especially when self-hosting `la
 
 ## Automated Security Audits in CI/CD
 
-Laya employs automated quality and security gates on every commit and pull request:
-- **Secret Leak Detection**: [`gitleaks`](.github/workflows/security.yml) scans git commit history and the checked-out working tree to prevent credentials, API tokens, and secrets from entering the repository.
-- **Dependency Vulnerability Scanning**: [`pip-audit`](.github/workflows/security.yml) scans shipped core and `[serve]` dependencies against known vulnerability databases (OSV / PyPI advisories).
-- **Static Analysis**: CodeQL runs automated semantic and security static analysis on every push.
+Laya employs automated quality and security gates on every push to `main` and on every pull request.
+What runs where, and what each lane costs, is [docs/ci.md](docs/ci.md); the short version is that a push
+runs the fast gate (one cell of each matrix), a pull request runs the full one, and the language ports
+report weekly rather than per commit:
+
+- **Secret Leak Detection**: [`gitleaks`](.github/workflows/security.yml) scans git commit history and the checked-out working tree to prevent credentials, API tokens, and secrets from entering the repository. On every push.
+- **Dependency Vulnerability Scanning**: [`pip-audit`](.github/workflows/security.yml) scans shipped core and `[serve]` dependencies against known vulnerability databases (OSV / PyPI advisories). On every pull request and the weekly cron.
+- **Static Analysis**: CodeQL runs automated semantic and security static analysis — Python on every push, and Python, Java, TypeScript and Go on every pull request and the weekly cron.
 - **npm Build Provenance**: The TypeScript SDK (`laya-ts`) is published with cryptographic build provenance and OIDC Trusted Publishing, ensuring package tarballs match the source repository without long-lived static tokens.

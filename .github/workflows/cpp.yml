@@ -31,10 +31,10 @@ name: C++
 
 on:
   # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
-  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
-  # goldens from the Python package -- the most expensive thing this repository runs. On a private
-  # repository those minutes are billed: the five port lanes were 33 of the 66 jobs one push to
-  # main asked for. See docs/ci.md and scripts/check_workflow_triggers.py.
+  # nothing it reports can block a pull request or a release. That is why it is not on the push path:
+  # a private repository bills those minutes, and the five port lanes were 33 of the 66 jobs a push
+  # to main asked for. One `goldens` job records what every cell compares against. See docs/ci.md and
+  # scripts/check_workflow_triggers.py.
   schedule:
     - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:

@@ -15,8 +15,8 @@ name: .NET
 
 on:
   # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
-  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
-  # goldens from the Python package. See docs/ci.md.
+  # nothing it reports can block a pull request or a release. One `goldens` job records what every
+  # cell compares against. See docs/ci.md.
   schedule:
     - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
@@ -235,25 +235,17 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
-      # FOUR at a time (was two). Every cell that needs weights fetches them from the same Hugging
-      # Face repo, and four in parallel -- alongside `java.yml`'s parity matrix against the same
-      # repo in the same run -- is what once provoked the throttle. Two was the answer then; it is
-      # now the wrong trade, because the matrix is seven cells (a checkpoint x layout pair for each
-      # checkpoint, plus the router) and at two the critical path would be half of the summed cell
-      # time, about 105 minutes on a slow host, no better than the one-cell-per-checkpoint shape
-      # this replaces. What changed since: the exports and the pinned Hub downloads are cached
-      # (keys below), so a warm run fetches nothing; a cold run fetches only for the cells that
-      # miss, `HF_TOKEN` authenticates those fetches, and `regen_golden.py` refuses an incomplete
-      # snapshot at the fetch, naming the file. Four is below the seven concurrent fetches that
-      # provoked the original throttle and gives, on the slow-host estimates below, a critical path
-      # of about 60 minutes (about 45 with seven slots, about 105 with two). The cells are listed
-      # longest first so the long ones start together and the short ones fill the slots as they
-      # free up. If a cold run is throttled, lower this to 2: the cost is wall time only, and this
-      # lane is advisory.
+      # FOUR at a time. This used to bound concurrent Hugging Face fetches -- seven cells each
+      # fetching the same repo is what once provoked a throttle, and two was the answer then. The
+      # fetching moved into the `goldens` job, so what this bounds now is CPU contention among C#
+      # test runs on a shared runner. Four gives a critical path of about 60 minutes on the
+      # slow-host estimates below; two would be about 105, which is no better than the
+      # one-cell-per-checkpoint shape this matrix replaced. The cells are listed longest first so the
+      # long ones start together and the short ones fill slots as they free up.
       max-parallel: 4
-      # One cell per checkpoint x layout. Both cells of a checkpoint regenerate that checkpoint's
-      # goldens from Python at this commit (the recording is layout independent but each cell owns
-      # its copy; nothing is shared between cells and goldens are never cached).
+      # One cell per checkpoint x layout, so a red cell names the layout that drifted. The recording
+      # is layout independent: both cells of a checkpoint test the same `goldens` artifact, which is
+      # why they no longer regenerate it.
       #
       # `layouts` is LAYA_TEST_LAYOUTS: it narrows the theory rows that exist for both layouts
       # (long and batch predictions). The test methods that exercise one layout only carry

@@ -6,6 +6,27 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.12] - 2026-11-06
+
+**No package code changes.** The documentation caught up with the code.
+
+All five port lanes still opened with "each matrix cell re-records its goldens", which stopped being
+true when cpp, dotnet and rust moved their recording into a `goldens` job (4.0.3–4.0.5). Each header now
+describes what its lane does: a recorder and consumers for cpp, dotnet and rust; disjoint per-cell
+recording for java; no matrix to deduplicate for go.
+
+`.NET`'s `max-parallel` rationale still argued from seven cells fetching the same Hugging Face
+repository, which is exactly the pressure that moved into the recorder — so the limit now says what it
+actually bounds, CPU contention among C# test runs, and keeps the measured critical-path numbers that
+justify four.
+
+`SECURITY.md` claimed the gates ran "on every commit and pull request". That was true before 4.0.2 and
+is not now: a push runs one cell of each matrix, the port lanes report weekly, dependency scanning runs
+on pull requests and the weekly cron, and CodeQL analyses one language on a push against four on a pull
+request or the cron. A security policy that overstates its coverage is worse than one that describes
+it, so the section now says which lane runs when and points at [CI](docs/ci.md) for the rest.
+
+
 ## [4.0.11] - 2026-11-06
 
 **No package code changes.** Item 7, part two: the three pieces of hygiene it named.

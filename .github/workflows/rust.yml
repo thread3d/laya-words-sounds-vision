@@ -5,8 +5,8 @@ name: Rust
 # checkout, never cache goldens or quietly pass model-backed tests with missing artifacts.
 on:
   # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
-  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
-  # fixtures from the Python package. See docs/ci.md.
+  # nothing it reports can block a pull request or a release. One `goldens` job records what every
+  # cell compares against. See docs/ci.md.
   schedule:
     - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:

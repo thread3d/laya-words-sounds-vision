@@ -33,8 +33,8 @@ name: Go
 
 on:
   # Weekly report, and on demand. Every job in this lane is advisory except the security scan, so
-  # nothing here blocks a pull request or a release, while each run re-records its goldens from the
-  # Python package. See docs/ci.md.
+  # nothing here blocks a pull request or a release. The lane records its own goldens once per run:
+  # it has no matrix, so there is nothing to deduplicate. See docs/ci.md.
   schedule:
     - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
