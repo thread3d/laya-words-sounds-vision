@@ -1,7 +1,7 @@
 name: Java
 
 # Parity lane for laya-java. The fixtures under laya-java/fixtures are recorded FROM the Python
-# `laya` package, so this runs on every push and pull request with no path filter: a change to
+# `laya` package, so this runs on every branch push and pull request with no path filter: a change to
 # laya/ that moves what the fixtures capture shows up here rather than as silent drift. Each run
 # re-records them from the Python code at that commit and runs the Java tests against the fresh
 # copies.
@@ -12,7 +12,10 @@ name: Java
 
 on:
   pull_request:
+  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
+  # built (36 wasted jobs on the v4.0.0 tag). release.yml is the only workflow a tag starts.
   push:
+    branches: [main]
   workflow_dispatch:
 #
 # SUPPLY CHAIN: `laya-java/gradle/wrapper/gradle-wrapper.jar` is a binary that executes at build

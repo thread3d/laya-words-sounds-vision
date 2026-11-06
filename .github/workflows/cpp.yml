@@ -1,7 +1,7 @@
 name: C++
 
-# Build lane for laya-cpp. Like the Go, .NET and Java lanes it runs on every push and pull request
-# with no path filter. This first change carries a skeleton only (no library code, no goldens, no
+# Build lane for laya-cpp. Like the Go, .NET and Java lanes it runs on every branch push and pull
+# request with no path filter. This first change carries a skeleton only (no library code, no goldens, no
 # ONNX Runtime), so there is no parity against the Python reference yet; what the lane proves is
 # that the toolchain builds, tests run, and the numeric flags are in force.
 #
@@ -29,7 +29,11 @@ name: C++
 
 on:
   pull_request:
+  # Branch pushes only. With no filter here a `v*` tag push re-runs this lane for the commit the
+  # branch push just built -- 36 wasted jobs on the v4.0.0 tag alone -- and release.yml is the only
+  # workflow a tag should start. See scripts/check_workflow_triggers.py.
   push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

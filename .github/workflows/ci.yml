@@ -278,7 +278,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      - run: pip install ruff pyyaml
       - name: Ruff
         # Two invocations, because the SDK script directories carry pre-existing F401/F811
         # import debt that is not worth churning in an unrelated change. They DO get `F82`,
@@ -292,6 +292,12 @@ jobs:
           ruff check sdk/python/ --select=E9,F63,F7,F82,F401,F811 --line-length=120
           ruff check laya-java/scripts/ laya-dotnet/tools/ laya-ts/scripts/ \
             laya-go/scripts/ --select=E9,F63,F7,F82 --line-length=120
+      - name: Workflow triggers (a tag push must not re-run a lane)
+        # The private-repo minutes this repository has are finite, and a bare `on: push:` spends
+        # them twice per commit: a tag push is a push, so tagging a release re-ran five lanes
+        # against the tree the branch push had just built. The check reads the YAML, matrix-expands
+        # it, and fails if a tag push costs more than the release jobs it is meant to cost.
+        run: python scripts/check_workflow_triggers.py
       - name: Byte-compile every module
         run: python -m compileall -q laya/ tests/ verify/ examples/ sdk/python/
 

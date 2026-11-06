@@ -4,7 +4,10 @@ name: Rust
 # Python improvements. Always regenerate fixtures from this checkout, never cache
 # goldens or quietly pass model-backed tests with missing artifacts.
 on:
+  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
+  # built. release.yml is the only workflow a tag starts.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

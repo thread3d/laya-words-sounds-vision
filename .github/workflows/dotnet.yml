@@ -1,8 +1,8 @@
 name: .NET
 
 # Parity lane for laya-dotnet. The golden fixtures under laya-dotnet/tests/Laya.Tests/golden are
-# recorded from the Python `laya` package, so this runs on EVERY push and pull request (no path
-# filter): a change to laya/ that moves what the goldens capture shows up here rather than as
+# recorded from the Python `laya` package, so this runs on EVERY branch push and pull request (no
+# path filter): a change to laya/ that moves what the goldens capture shows up here rather than as
 # silent drift. Each run re-records the goldens from the Python code at that commit
 # (tools/regen_golden.py) and runs the C# tests against the fresh copies.
 #
@@ -15,7 +15,10 @@ name: .NET
 
 on:
   pull_request:
+  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
+  # built (36 wasted jobs on the v4.0.0 tag). release.yml is the only workflow a tag starts.
   push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
