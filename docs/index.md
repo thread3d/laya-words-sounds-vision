@@ -22,9 +22,10 @@ Install Laya and make a first decision with the README's
 [Quickstart](https://github.com/thread3d/laya-words-sounds-vision#quickstart). They stay in the README so there
 is one copy to keep current.
 
-2.0 adds the third modality and reorganises the layout the media share, without changing a text or
-vision call site. If you are upgrading, [Upgrading to 2.0](upgrading.md) lists what moved; the
-release history is in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
+3.0 is the measured release: the sound path's first public numbers, both media gates, and the
+frozen-tower ladder are in [the audio results](audio-benchmark-results.md). If you are upgrading,
+[Upgrading](upgrading.md) answers "do I have to change anything?" per release; the release history is
+in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
 
 ## Find a guide
 

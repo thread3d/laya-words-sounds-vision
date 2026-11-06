@@ -1,11 +1,36 @@
-# Upgrading to 2.0
+# Upgrading
+
+This page is the per-release answer to "do I have to change anything?". The newest release comes
+first and the older sections stay, because a user can be arriving from any version. Release history,
+including the 2.1 tags this page does not repeat line by line, is in
+[CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
+
+## 3.0 — the measured release
+
+**Nothing to change.** 2.0 added the sound modality and 2.1 measured it on public data (ESC-50, ESC-10
+and FSDD, with both media gates); no call site moves for text, vision or audio, and no checkpoint
+needs rebuilding. The numbers, the controls and the like-for-like caveats are in
+[the audio results](audio-benchmark-results.md).
+
+Two things worth knowing if you upgrade:
+
+* **What the trainer calls held out.** A held-out eval set of recordings is now reported as
+  `eval_mode: "held_out"` / `is_held_out: true`. Before, every recording looked like a training row —
+  the overlap detector keyed on the image's content hash but not the recording's, and every ESC-50
+  row shares its state text — so a run refused to call its own numbers held out. Code that keys on
+  those fields for a media run will see the corrected value.
+* **Three new optional flags**, all additive: `laya-train --encode-workers` (encode a media dataset's
+  inputs in threads), `laya-train --checkpoint-every` (a media checkpoint is ~1.2 GB; `0` keeps only
+  the final one), and `laya-evals ablate|flip --batch-size` (re-answer several rows per forward pass).
+
+## 2.0 — a third modality
 
 2.0 adds a third modality — a state may now carry a **sound** as well as words or a picture — and
-moves the layout and projector the two media share into modules of their own. This page is the
-short version for someone who already runs Laya: what changes for you, what does not, and what to do
+moves the layout and projector the two media share into modules of their own. This section is the
+short version for someone arriving from 1.0.x: what changes for you, what does not, and what to do
 if you were reaching into something internal.
 
-## Do I have to change anything?
+### Do I have to change anything?
 
 **No, for a text or vision deployment.** A checkpoint whose config carries no `"audio"` block parses
 to `None`, every sound branch is skipped, and a text checkpoint's sequences and a vision
@@ -27,7 +52,7 @@ It is optional on purpose: the declared dependencies stay `torch`, `transformers
 `huggingface_hub` and `numpy`, PCM WAV decodes with the standard library, and a caller with its own
 decoder passes `{"audio": {"waveform": <tensor>}}` and skips the codec entirely.
 
-## What is new, in one table
+### What is new, in one table
 
 | you want to | do this | read |
 |---|---|---|
@@ -38,7 +63,7 @@ decoder passes `{"audio": {"waveform": <tensor>}}` and skips the codec entirely.
 | gate a checkpoint on the recording mattering | `laya-evals ablate eval.jsonl --modality audio --min-gain 0.35` | [Media gates](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording) |
 | understand the whole design | — | [The sound decision system](audio-decision-system.md) |
 
-## Names that moved
+### Names that moved
 
 The layout and the projector are now shared, so they live where both modalities can import them.
 Every public name below is either still re-exported from its old home or was private:
@@ -59,7 +84,7 @@ Every public name below is either still re-exported from its old home or was pri
 modalities cannot drift apart on the splice point. If you have a test that pins `visual_plan`'s
 output for a given config, it passes unchanged.
 
-## Behaviour that is new, and deliberately strict
+### Behaviour that is new, and deliberately strict
 
 Three rules were added rather than inherited, and each refuses loudly:
 
@@ -74,13 +99,13 @@ Three rules were added rather than inherited, and each refuses loudly:
 A recording is also refused, not truncated, when it exceeds the byte or duration cap. The caps are
 checked on the container header before any decoder runs (`check_audio_bytes`).
 
-## If you are on 1.1.0 specifically
+### If you are on 1.1.0 specifically
 
 That tag bumped `pyproject.toml` without `laya.__version__` and `nix/package.nix`, so the three
 disagreed. 1.1.1 brought them in step and `tests/test_packaging.py` holds them equal from then on;
 upgrade past it or straight to 2.0.
 
-## Checking your upgrade
+### Checking your upgrade
 
 ```bash
 python -c "import laya; print(laya.__version__)"        # 2.0.0

@@ -6,6 +6,74 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.0.0] - 2026-11-05
+
+The release that makes the sound path a **measured** capability. 2.0 shipped the modality; 2.1 put
+it on public data, found seven defects doing it, and turned three of the findings into options. 3.0
+consolidates that and marks the one thing a caller can notice.
+
+**What the major number marks.** The Python API remains additive — text and vision call sites do not
+change, and a checkpoint without an `"audio"` block is untouched. What changed is *what the trainer
+reports*: a held-out eval set of media rows is now correctly reported as held out (before, every
+recording looked like a training row, so a run refused to call its own numbers held out). A caller
+keying on `eval_mode`/`is_held_out` in `train_report.json` will see `held_out` where 2.0 said
+`overlapping_eval` for the same files, and that is the correct answer. [Upgrading](docs/upgrading.md)
+lists it with the rest.
+
+### Measured, and now quoted in the documentation
+
+- **The engine on public data**: FSDD, 1 000 speaker-disjoint held-out clips, frozen encoder —
+  **0.7550** accuracy at 10-way, **gate 1 +0.655** (removing the recording drops it to chance), 69 ms
+  median CPU latency per decision, and **gate 2b 27.4 %** on the joint layout.
+- **The shipping layout passes both gates** on a learning 20-option control: accuracy 1.0000, gate 1
+  **+0.906**, **0.0 %** option-order flips.
+- **The frozen-tower ladder**, same rows, same closed-form head: `wav2vec2-base` 0.5265 (ESC-50) /
+  0.7300 (ESC-10) / 0.7950 (FSDD); its ASR sibling 0.3805 / 0.6425; `wav2vec2-large` **0.6280** /
+  **0.8425** / **0.9750**. The rule: self-supervised for environmental sound, ASR for speech content,
+  and size beats head within either.
+- The published comparison table the numbers sit against (AST, BEATs, PANNs, CLAP, Whisper, Dasheng,
+  BYOL-A, human), with the protocol column that says which rows are like-for-like.
+
+### Added
+
+- `laya-train --encode-workers` (`TrainConfig.encode_workers`, `laya.train.encode_media`): a media
+  dataset's inputs are encoded in threads — 9.2 inputs/s serially against 18.9 with eight threads,
+  identical items.
+- `laya-evals ablate|flip --batch-size` (`batch_size` on both gate functions): the two passes can
+  re-answer several rows per forward pass, grouped by question set, 6-8x faster at 50 options on a
+  CPU and verified equal to the single-row path on real rows.
+- `laya-train --checkpoint-every` (`TrainConfig.checkpoint_every`): a media checkpoint is ~1.2 GB
+  (encoder plus bundled tower) and the per-epoch recovery write cost more than the epoch it
+  protected (~6 min against 2.4 min); `0` keeps only the final checkpoint.
+- `research/benchmarks/audio_esc50/`: the ESC-50 and FSDD harness (prep, probe, train, gates,
+  synthetic controls) with its own README and every command that produced a number.
+- `docs/audio-benchmark-assessment.md` and `docs/audio-benchmark-results.md`.
+
+### Fixed
+
+Seven defects the benchmark runs exposed:
+
+1. A held-out eval set of recordings was reported as overlapping its training data — the trainer's
+   input signature keyed on the image hash but not the recording, and every ESC-50 row shares its
+   state text.
+2. Media dataset builds were serial (see `--encode-workers`).
+3. The gates could not batch, although `docs/evals.md` said they did (see `--batch-size`).
+4. The benchmark's own gate runner recorded no decisions under batching, and printed an accuracy of
+   exactly 0.0 as `nan`.
+5. The per-epoch recovery checkpoint cost more than the epoch (see `--checkpoint-every`).
+6. The probe's frame cache was keyed on the clip name alone, so a second tower would have scored the
+   first tower's features.
+7. Documentation claims that were wrong or overclaiming, including "above every published frozen
+   probe" (it is above Whisper and Dasheng, below BEATs and BYOL-A) and a cross-cardinality
+   comparison against the 50-way human baseline.
+
+### Known limits, stated rather than hidden
+
+The 50-way engine number at a real budget, a `state_conditioned` arm on *public* data (~11 min/epoch
+on a CPU, because a media step cannot skip the backward pass through a frozen encoder), 5-fold engine
+arms, and AST/BEATs fine-tuned comparisons all need a GPU. `audio.input: "mel"` for
+spectrogram-style towers is still unimplemented.
+
 ## [2.1.7] - 2026-11-05
 
 The tower table completed, and two overclaims in it corrected.
@@ -206,7 +274,7 @@ transport limits and evaluation gates the picture already used.
 byte-identical after this release, and no call site has to change. The major version marks the
 contract change — a *state* now has three modalities, a checkpoint config may carry an `"audio"`
 block, and `MODALITIES` has a third tag — plus the internal reorganisation that made one layout
-serve both. [Upgrading to 2.0](docs/upgrading.md) lists every name that moved and what a caller who
+serve both. [Upgrading](docs/upgrading.md) lists every name that moved and what a caller who
 was reaching into a private helper should do instead.
 
 ### Added
