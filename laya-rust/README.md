@@ -766,10 +766,11 @@ The advisory [Rust parity lane](../.github/workflows/rust.yml) runs **weekly** (
 and on demand, over the whole tree, with no path filter — `docs/ci.md` explains why the port lanes
 are a weekly report rather than a per-commit gate. It is sharded per checkpoint (english,
 multilingual, typed-decisions, plus
-a router cell for the tests that load english and multilingual together). Each cell regenerates
-its own checkpoint's goldens, and the routing goldens, from the Python `laya/` at that commit
-using [`tools/regen_golden.py`](tools/regen_golden.py), then runs the Cargo tests with
-`LAYA_TEST_CHECKPOINTS` set to its checkpoints and its own `--min-passed` floor.
+a router cell for the tests that load english and multilingual together). One `goldens` job records
+every checkpoint's goldens and the routing goldens from the Python `laya/` at that commit using
+[`tools/regen_golden.py`](tools/regen_golden.py) and publishes them as a one-day artifact; each cell
+takes that recording and runs the Cargo tests with `LAYA_TEST_CHECKPOINTS` set to its checkpoints and
+its own `--min-passed` floor.
 Goldens are never cached; the exports are, per checkpoint. A `skip:` diagnostic or ignored test makes the lane red, even when
 Cargo counts a missing-model early return as a pass. Job-level `continue-on-error` keeps Python
 improvements unblocked; Rust drift needs a follow-up port. This workflow never publishes crates.

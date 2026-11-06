@@ -74,6 +74,7 @@ Two lanes now have a `goldens` job that records once and publishes artifacts for
 |---|---|---|
 | `cpp.yml` | `cpp-goldens` (the nine families) and `cpp-checkpoint-parts` (`<checkpoint>/tokenizer/` and `rl_agent_config.json` for english and multilingual — the only files a cell opens, not the weights) | both, and install nothing: no torch, no hub, no generator |
 | `dotnet.yml` | `dotnet-goldens` (routing, round4, and the three checkpoints, recorded by one `regen_golden.py --checkpoint all`) | the artifact; the ONNX exports they still need come from the cache the recorder warms |
+| `rust.yml` | `rust-goldens` (routing plus the three checkpoints — nine recording passes for four recordings before this, because every cell also recorded `routing` and the router cell recorded english and multilingual again) | the artifact; the ONNX exports come from the cache the recorder warms |
 
 The five `build` cells of `cpp.yml` and the model-free `build` job of `dotnet.yml` run no Python
 generator at all, so they no longer install torch or reach the hub. They assert the shape of what
@@ -92,8 +93,8 @@ and artifact storage is billed the way minutes are.
 `tests/test_ci_record_once.py` is the guard: a consumer that downloads an artifact without
 `needs: goldens`, a cell that starts recording the shared set again, a cache entry the recorder warms
 under a key no cell restores, or a lane that half-migrates (consumers rewired, recorder missing)
-fails it. `java.yml`, `rust.yml` and `go.yml` still record per cell, and it reports that as a skip
-rather than passing silently.
+fails it. `java.yml` and `go.yml` still record per cell, and it reports that as a skip rather than
+passing silently.
 
 ## What one commit costs
 

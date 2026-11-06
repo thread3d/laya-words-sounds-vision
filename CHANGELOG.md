@@ -6,6 +6,26 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.5] - 2026-11-06
+
+**No package code changes.** The Rust lane records its goldens once.
+
+Its four parity cells each installed torch, fetched checkpoints and re-recorded their own goldens —
+and every one of them recorded `routing`, while the router cell recorded english and multilingual
+again. Nine recording passes produced four recordings. One `goldens` job now records all of them
+(`regen_golden.py --checkpoint all`, which is the union of what the cells asked for: the script
+records each checkpoint through an independent call), warms the three ONNX export caches under the
+keys the cells restore, and publishes `rust-goldens` for one day. The cells declare
+`needs: goldens`, take the artifact, and install only the pinned requirements the skip-guard and
+cache tests import — no torch, no hub token, no generator.
+
+The `max-parallel: 2` on that matrix stays, but its reason changed and the comment now says so: it
+was there to keep four unauthenticated hub fetches from throttling each other, and that pressure
+moved to the recorder. Two at a time is still the measured best for CPU-bound inference cells on
+shared runners.
+
+`laya-rust/README.md` described per-cell regeneration and now describes what happens.
+
 ## [4.0.4] - 2026-11-06
 
 **No package code changes.** The .NET lane records its goldens once, and the pattern gets a guard.
