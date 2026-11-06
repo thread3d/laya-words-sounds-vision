@@ -715,6 +715,57 @@ def test_pcm_wav_decodes_with_the_standard_library():
     assert waveform.abs().max().item() <= 1.0 + 1e-6
 
 
+def test_a_pcm_wav_decodes_without_the_optional_decoder():
+    """PCM is the case `laya[audio]` is explicitly *not* needed for, and it was broken.
+
+    `_wav_info` parsed the container's format code but dropped it from the dict it returned, so
+    `decode_waveform`'s `info.get("audio_format") == 1` was always false and *every* WAV took the
+    `soundfile` path. On a CPU install without the extra -- or on this machine's ROCm interpreter,
+    which has no soundfile -- an ordinary 16-bit recording could not be decoded at all.
+    """
+    import builtins
+
+    from laya.audio import audio_info, load_waveform
+
+    wav = _wav_bytes(seconds=0.05, rate=8000)
+    assert audio_info(wav)["audio_format"] == 1, audio_info(wav)
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "soundfile":
+            raise ImportError("soundfile blocked for this test")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = blocked
+    try:
+        waveform = load_waveform(wav, sample_rate=8000)
+        assert waveform.numel() == 400, waveform.numel()
+        # ... and a WAV the standard library cannot read says which codec it needed.
+        float_wav = _float_wav_bytes(seconds=0.02, rate=8000)
+        try:
+            load_waveform(float_wav, sample_rate=8000)
+        except ImportError as exc:
+            assert "IEEE float" in str(exc), str(exc)
+            assert "laya[audio]" in str(exc), str(exc)
+        else:
+            raise AssertionError("a float WAV must name the decoder it needs")
+    finally:
+        builtins.__import__ = real_import
+
+
+def _float_wav_bytes(seconds=0.02, rate=8000, channels=1):
+    """A WAVE_FORMAT_IEEE_FLOAT file: `wave` refuses it, so it needs `soundfile`."""
+    import struct
+
+    n = int(seconds * rate) * channels
+    payload = struct.pack("<%df" % n, *([0.25] * n))
+    header = b"RIFF" + struct.pack("<I", 36 + len(payload)) + b"WAVE"
+    fmt = b"fmt " + struct.pack("<IHHIIHH", 16, 3, channels, rate, rate * channels * 4,
+                                channels * 4, 32)
+    return header + fmt + b"data" + struct.pack("<I", len(payload)) + payload
+
+
 def test_every_pcm_width_decodes():
     from laya.audio import load_waveform
 
@@ -955,6 +1006,7 @@ if __name__ == "__main__":
     test_byte_and_duration_limits_are_enforced()
     test_a_header_that_states_no_duration_is_refused_while_the_cap_is_in_force()
     test_pcm_wav_decodes_with_the_standard_library()
+    test_a_pcm_wav_decodes_without_the_optional_decoder()
     test_every_pcm_width_decodes()
     test_a_stereo_recording_is_downmixed_to_mono()
     test_resampling_changes_the_length_and_keeps_the_tone()

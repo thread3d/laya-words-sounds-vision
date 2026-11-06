@@ -6,6 +6,19 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.0.1] - 2026-11-05
+
+### Fixed
+
+- **A PCM WAV no longer needs `soundfile`.** `_wav_info` parsed the container's format code and then
+  dropped it from the dict it returned, so `decode_waveform`'s `info.get("audio_format") == 1` was
+  always false and *every* WAV took the optional decoder's path — the exact opposite of the
+  documented contract ("PCM WAV decodes with the standard library"). It went unnoticed because the
+  CPU test environment has the extra installed; a ROCm interpreter without `soundfile` could not
+  decode an ordinary 16-bit recording at all. A WAV that the standard library genuinely cannot read
+  (IEEE float, `WAVE_FORMAT_EXTENSIBLE`, A-law, mu-law, ADPCM) now names its codec in the
+  `ImportError` instead of saying "compressed audio".
+
 ## [3.0.0] - 2026-11-05
 
 The release that makes the sound path a **measured** capability. 2.0 shipped the modality; 2.1 put

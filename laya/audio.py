@@ -559,7 +559,13 @@ def _wav_info(data):
         frames = data_size // max(1, fmt["channels"] * fmt["bits"] // 8)
         duration = frames / fmt["sample_rate"]
     return {"format": "wav", "sample_rate": fmt["sample_rate"], "channels": fmt["channels"],
-            "bits": fmt["bits"], "duration_seconds": duration}
+            "bits": fmt["bits"], "duration_seconds": duration,
+            # Which codec the container declares. `decode_waveform` uses it to decide whether the
+            # standard library can read the file (PCM) or a real decoder is needed (IEEE float,
+            # WAVE_FORMAT_EXTENSIBLE, ADPCM). Dropping it here made every WAV take the `soundfile`
+            # path -- the check `info.get("audio_format") == 1` could never be true, so a CPU
+            # install without the extra could not decode an ordinary recording.
+            "audio_format": fmt["audio_format"]}
 
 
 def _flac_info(data):
@@ -743,7 +749,7 @@ def read_audio_bytes(spec, max_bytes: Optional[int] = None, max_seconds: Optiona
     return data
 
 
-def _soundfile():
+def _soundfile(hint: str = "compressed audio"):
     """Import the optional decoder, naming the extra when it is missing.
 
     `soundfile` is `pip install laya[audio]`. It is optional on purpose: the package's declared
@@ -756,8 +762,8 @@ def _soundfile():
         import soundfile
     except ImportError as exc:                                  # pragma: no cover - optional dep
         raise ImportError(
-            "decoding a %s file needs soundfile: `pip install laya[audio]`, or pass "
-            "{'waveform': <tensor>} with your own decoder" % "compressed audio") from exc
+            "decoding %s needs soundfile: `pip install laya[audio]`, or pass "
+            "{'waveform': <tensor>} with your own decoder" % hint) from exc
     return soundfile
 
 
@@ -779,7 +785,15 @@ def decode_waveform(data, info: Optional[Dict[str, Any]] = None,
     max_frames = int(max_seconds * rate) if max_seconds else None
     if fmt == "wav" and info.get("audio_format") == 1:
         return _decode_wav_pcm(data, info, max_frames, torch)
-    soundfile = _soundfile()
+    if fmt == "wav":
+        # A WAV the standard library cannot read: IEEE float (3), WAVE_FORMAT_EXTENSIBLE (0xFFFE),
+        # ADPCM and friends. `soundfile` handles them; the message names the codec so a caller
+        # knows why an ordinary-looking `.wav` needed the extra.
+        soundfile = _soundfile(hint="a %s-format WAV" % {
+            3: "IEEE float", 0xFFFE: "WAVE_FORMAT_EXTENSIBLE", 2: "ADPCM", 6: "A-law",
+            7: "mu-law"}.get(info.get("audio_format"), "non-PCM"))
+    else:
+        soundfile = _soundfile()
     import io
     try:
         samples, rate = soundfile.read(io.BytesIO(data), dtype="float32", always_2d=True)
