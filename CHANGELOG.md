@@ -6,6 +6,16 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.1.3] - 2026-11-05
+
+### Added
+
+- `research/benchmarks/audio_esc50/cv_esc10.py`: the published five-fold protocol at engine scale --
+  ESC-10 cross-validation in the shipping layout, each fold scored with both media gates and the mean
+  and spread reported. It costs about two minutes per epoch on one card, so a five-fold run is roughly
+  two hours; the fold-level arms in the results page are what this session ran, and this is the tool
+  for a longer one.
+
 ## [3.1.2] - 2026-11-05
 
 A published comparator, measured here: CLAP zero-shot on ESC-50.

@@ -29,6 +29,7 @@ recording?) and `flip` (does reordering the options change it?).
 | `run_engine_arms.sh` | both engine arms back to back, each followed by its gates |
 | `eval_gate.py` | accuracy, gate 1, gate 2b and per-decision latency for one checkpoint |
 | `zeroshot_clap.py` | the CLAP zero-shot comparator, measured locally: 0.8955 on all 2 000 clips |
+| `cv_esc10.py` | the published protocol at engine scale: ESC-10 five-fold cross-validation in the shipping layout, each fold scored with both gates. ~2 minutes per epoch on one card, so a five-fold run is about two hours; the fold-level arms in the results page are what this session ran |
 | `gpu_patch.py`, `train_gpu.py`, `gpuenv.sh`, `run_gpu_arms.sh` | the cards: the MIOpen conv workaround, a `laya-train` entry point that installs it, the environment, and both arms one per GPU |
 
 Data and checkpoints live in `$AUDIO_BENCH_DATA` (default `<repo>/.audio-bench`, gitignored):

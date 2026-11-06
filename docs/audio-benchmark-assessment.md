@@ -100,6 +100,9 @@ name the answer — and measures four arms on the identical rows:
 | **Laya** | the engine: frozen tower → projector → block spliced after the option head, trained with `laya-train --audio` | the thing being measured |
 | **CLAP zero-shot** | `laion/clap-htsat-unfused`, text prompts against audio embeddings, no training on ESC-50 | a published system measured here, so the comparison is local rather than borrowed — 0.8955 on all 2 000 clips |
 
+and `cv_esc10.py`, which runs the published five-fold protocol at engine scale in the shipping layout
+(about two hours on one card; the fold-level arms are what the results page reports).
+
 Then the two gates from [the evaluation harness](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording):
 `ablate --modality audio` (does the answer depend on the recording?) and `flip` (does reordering the
 options change it?). A Laya number without those two gates would repeat exactly the mistake the
