@@ -81,7 +81,7 @@ jobs:
   # how a scanner quietly stops scanning.
   security:
     name: jvm security scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,7 +117,7 @@ jobs:
     # "parity (english)": without a prefix the pull request's checks list shows each name twice
     # and a reader cannot tell which lane failed.
     name: jvm build + model-free tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 25
     steps:
@@ -277,7 +277,7 @@ jobs:
   # must not move when the host JDK's own Unicode does -- and that is what this measures.
   jdk-matrix:
     name: jvm model-free tests (jdk ${{ matrix.jdk }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 25
     strategy:
@@ -403,7 +403,7 @@ jobs:
   # graph.
   parity:
     name: jvm parity (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: ${{ matrix.timeout }}
     strategy:

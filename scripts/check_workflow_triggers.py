@@ -27,6 +27,10 @@ What this enforces:
   the 66 jobs a push to `main` asked for.
 * Each scenario -- a push to `main`, a tag on the same commit, a pull request, the weekly crons --
   stays inside its own budget, printed on every run.
+* A job names a hosted runner, a matrix dimension, or the opt-in selector
+  `fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]')` -- never a hardcoded `self-hosted`. A lane with
+  no runner queues until it times out and then fails, which is a failure report nobody asked for;
+  docs/self-hosted-runner.md has the contract.
 
 ## How breadth is expressed, and how it is counted
 
@@ -65,6 +69,11 @@ SCENARIOS = (PUSH, TAG, PR, WEEKLY)
 # A release-shaped tag: `release.yml` fires on it because its pattern is `v*`. `laya-java-v*` and
 # `laya-ts-v*` deliberately do not match it, so the SDK releases are not counted here.
 TAG_NAME = "v9.9.9"
+
+# Runners a job may name directly. Anything else has to arrive through the opt-in selector, so that
+# an unset variable means "hosted" and a machine being down cannot park a lane forever.
+HOSTED_RUNNERS = {"ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-latest"}
+RUNNER_SELECTOR = "vars.LAYA_RUNNER"
 
 BUDGETS = {
     PUSH: 14,
@@ -318,10 +327,71 @@ def violations(rows, budgets):
                     f"`github.event_name`, so the cron run and the push run collide and one cancels "
                     f"the other."
                 )
+    problems.extend(runner_problems(rows))
     for scenario, budget in budgets.items():
         total = sum(row["jobs"][scenario] for row in rows)
         if total > budget:
             problems.append(f"{scenario}: {total} jobs, budget is {budget}")
+    return problems
+
+
+def runner_label_problem(where, value):
+    """None when a `runs-on` is acceptable, else why it is not."""
+    self_hosted = (
+        f"{where}: names `self-hosted` directly. Reach it through `{RUNNER_SELECTOR}` instead, so "
+        f"an unset variable still means a hosted runner (docs/self-hosted-runner.md)."
+    )
+    if isinstance(value, list):
+        if any(str(item).lower() == "self-hosted" for item in value):
+            return self_hosted
+        return None
+    text = str(value)
+    if "self-hosted" in text.lower() and RUNNER_SELECTOR not in text:
+        return self_hosted
+    if RUNNER_SELECTOR in text:
+        if not any(runner in text for runner in HOSTED_RUNNERS):
+            return (
+                f"{where}: the `{RUNNER_SELECTOR}` selector has no hosted fallback, so the job "
+                f"would ask for an empty runner set when the variable is unset."
+            )
+        return None
+    if text.startswith("${{"):
+        # An expression, such as the event-conditional matrix used for the Docker smoke cells. Any
+        # literal label inside it has to be a hosted runner; a `matrix.` reference is checked where
+        # the matrix is declared.
+        labels = set(re.findall(r'"([A-Za-z0-9._-]+)"', text))
+        unknown = sorted(labels - HOSTED_RUNNERS)
+        if unknown:
+            return f"{where}: names {unknown} inside a `runs-on` expression; only hosted labels belong there."
+        return None
+    if text in HOSTED_RUNNERS:
+        return None
+    return f"{where}: unknown runner {text!r}; name a hosted runner or the `{RUNNER_SELECTOR}` selector."
+
+
+def runner_problems(rows):
+    problems = []
+    for row in rows:
+        for job_name, job in (row["doc"].get("jobs") or {}).items():
+            where = f".github/workflows/{row['file']}:{job_name}"
+            problem = runner_label_problem(where, job.get("runs-on"))
+            if problem:
+                problems.append(problem)
+            # A matrix can carry the label out of sight: a `runner:` or `os:` dimension, or an
+            # `include:` entry that sets one.
+            matrix = (job.get("strategy") or {}).get("matrix") or {}
+            for key, value in matrix.items():
+                entries = value if key in ("include", "exclude") else [{key: value}]
+                for entry in entries or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    for dim, dim_value in entry.items():
+                        if not (dim.lower().endswith("runner") or dim == "os"):
+                            continue
+                        for candidate in dim_value if isinstance(dim_value, list) else [dim_value]:
+                            problem = runner_label_problem(f"{where}/{dim}", candidate)
+                            if problem:
+                                problems.append(problem)
     return problems
 
 

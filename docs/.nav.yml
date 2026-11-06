@@ -28,4 +28,5 @@ nav:
       - finetune_browser_agent.md
   - Development:
       - ci.md
+      - self-hosted-runner.md
   - reference

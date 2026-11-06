@@ -6,6 +6,34 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.7] - 2026-11-06
+
+**No package code changes.** Item 3: the port lanes can run on a machine you own, and nothing moves
+until you say so.
+
+The five port workflows — `cpp`, `dotnet`, `go`, `java`, `rust` — now name their runner through one
+expression, `fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]')`. Unset, that is a hosted runner and
+today's behaviour exactly; set to `["self-hosted", "laya-gpu"]`, all 17 jobs in those five files move
+to a runner you control, which spends no billed minutes and already has the three checkpoints. The
+blocking gate is deliberately excluded: `ci.yml`, `security.yml`, `docs.yml`, `docker.yml` and the
+release lanes stay hosted, because a machine that is off, rebooting or busy must not be able to stop a
+push from being verified or a release from publishing.
+
+`scripts/setup_github_runner.sh` installs the runner: pinned to v2.338.2 linux-x64 with its SHA-256
+verified before extraction (the checksum published in that release's notes, re-derived here from the
+downloaded archive), `--dry-run` for the plan, `--verify` for any tarball, `--tarball` for offline
+installs, and the two `sudo` commands printed rather than run: a bootstrap that escalates on its own
+is one nobody can review before using it.
+
+`scripts/check_workflow_triggers.py` learned the contract, because the failure it prevents is quiet:
+a job asking for a label no runner has waits in the queue and is eventually refused, which arrives as
+a failure report unrelated to the code. A `runs-on` may name a hosted label, a matrix dimension, or
+the selector; naming `self-hosted` directly fails, including inside a matrix dimension or an
+`include:` entry, and so does a selector whose fallback is not a hosted runner.
+
+`docs/self-hosted-runner.md` covers what the machine needs, how to turn it on and off, and the trade
+in plain terms: a runner executes repository code with direct access to the machine it sits on.
+
 ## [4.0.6] - 2026-11-06
 
 **No package code changes.** Item 2 finishes: every port lane records each golden once, and a test

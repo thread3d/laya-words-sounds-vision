@@ -34,7 +34,7 @@ jobs:
   # Nine recording passes for four recordings. See docs/ci.md ("Record once, fan out").
   goldens:
     name: goldens (recorded once for every cell)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # Recording all four sets is the long pole: the cells ran 40-100 minutes INCLUDING their test
     # run, and this job trades their parallel exports for one serial pass. Generous on purpose --
     # one job timing out fails the lane, where a slow cell only fails itself.
@@ -111,7 +111,7 @@ jobs:
 
   parity:
     name: parity (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # The goldens arrive recorded; what stays per cell is the checkpoint this cell selects, the
     # ONNX artifacts it loads and the Rust tests themselves.
     needs: goldens

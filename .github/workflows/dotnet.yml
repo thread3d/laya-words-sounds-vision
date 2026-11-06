@@ -49,7 +49,7 @@ jobs:
   # docs/ci.md ("Record once, fan out").
   goldens:
     name: goldens (recorded once for every cell)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,7 +129,7 @@ jobs:
 
   build:
     name: build + model-free tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # The routing goldens arrive recorded; this job runs the model-free tests and the regen-cache
     # regressions in tools/test_ci_tools.py, neither of which needs a checkpoint.
     needs: goldens
@@ -221,7 +221,7 @@ jobs:
 
   parity:
     name: parity (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # The goldens arrive recorded (and byte-identical across the cells that share a checkpoint);
     # what stays per cell is the ONNX artifacts it needs and the C# tests in its own layout filter.
     needs: goldens

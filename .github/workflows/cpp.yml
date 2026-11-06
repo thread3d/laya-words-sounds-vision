@@ -66,7 +66,7 @@ jobs:
   # See docs/ci.md ("Record once, fan out").
   goldens:
     name: goldens (recorded once for every cell)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,7 +131,7 @@ jobs:
 
   build:
     name: build (${{ matrix.compiler }}, ${{ matrix.preset }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # The GoogleTest pin is verified before it is fetched and built, and the goldens are recorded
     # once for all five cells rather than once per cell.
     needs: [security, goldens]
@@ -218,7 +218,7 @@ jobs:
   # nothing until this job and Go's are made blocking together.
   onnx:
     name: onnx (${{ matrix.compiler }}, ${{ matrix.preset }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     # The shared goldens come from the recorder; only the two graph-backed families are recorded
     # here, because they need the graph this cell exports.
     needs: [security, goldens]
@@ -351,7 +351,7 @@ jobs:
 
   security:
     name: cpp security scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

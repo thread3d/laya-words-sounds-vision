@@ -149,6 +149,11 @@ Pushes, tags and releases keep working while this is set; only workflow executio
 practical cost of leaving it off is that nothing verifies the code, so it is a stopgap, not a
 policy.
 
+The two durable answers to the bill are [the self-hosted runner](self-hosted-runner.md) — the port
+lanes read one repository variable, and a machine you already own spends no minutes — and making the
+repository public, which grants free hosted minutes and is a visibility decision rather than a CI
+one.
+
 ## Release tags
 
 `release.yml` fires on any `v*` tag and requires `pyproject.toml`'s version to equal the tag before

@@ -66,7 +66,7 @@ env:
 jobs:
   parity:
     name: go parity
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 30
     steps:
@@ -164,7 +164,7 @@ jobs:
 
   onnx:
     name: go onnx parity
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 75
     env:
@@ -267,7 +267,7 @@ jobs:
 
   static:
     name: go static checks
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 15
     steps:
@@ -314,7 +314,7 @@ jobs:
 
   security:
     name: go security scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

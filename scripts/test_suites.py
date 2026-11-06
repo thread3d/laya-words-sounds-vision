@@ -71,6 +71,7 @@ SCRIPT_SUITES = [
     "tests/test_truncation.py",
     "tests/test_packaging.py",
     "tests/test_ci_record_once.py",
+    "tests/test_setup_runner_script.py",
     "tests/test_imports.py",
     "tests/test_compose_env.py",
     "tests/test_audit_scope.py",
