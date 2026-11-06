@@ -6,6 +6,25 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.14] - 2026-11-06
+
+Two Dependabot branches resolved: one applied, one declined with the reason written down.
+
+**Applied — `@types/node` 26.6.5 → 26.6.6** in `laya-ts` (Dependabot PR #1). A patch bump of type
+definitions only. `npm ci` accepts the updated lock and `npm run test:types` passes.
+
+**Declined — numpy `numpy<2` → `numpy<3`** in the `onnx` extra (Dependabot PR #2). The cap is
+marker-scoped to macOS/Intel, where torch tops out at 2.2.2 — below 2.3, the first release built
+against NumPy 2 — so `<2` is the only value that keeps `predict()`'s final `.numpy()` working on that
+platform. The requirement's comment already explained this; it now also records that Dependabot
+proposes `<3` periodically and that the answer is no, so the next reader does not have to work it out
+again.
+
+Both branches are deleted, and their pull requests are closed rather than left open as churn.
+Dependabot may re-propose the numpy widening on its weekly schedule; it can be closed again, and the
+comment in `pyproject.toml` is the answer.
+
+
 ## [4.0.13] - 2026-11-06
 
 **No package code changes.** A cold-start timeout fixed, and a first-run runbook written.

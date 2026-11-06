@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "laya"
-version = "4.0.13"
+version = "4.0.14"
 description = "Fast, non-autoregressive System 1 decision engine with calibrated probabilities"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -81,6 +81,11 @@ audio = ["soundfile>=0.12.0"]
 # actually affects: the macOS/Intel checkout (#948), where torch tops out at 2.2.2 and NumPy 1.26
 # satisfies onnx, onnxruntime and onnxscript. Every other platform resolves what `onnx` wants,
 # so none of those three is quietly pinned to NumPy 1.x on its behalf.
+#
+# Dependabot proposes relaxing this cap to `<3` every few weeks, reading it as stale because the
+# package floor is `torch>=2.0.0`. It is not stale: this marker names the one platform where torch
+# CANNOT be newer than 2.2.2, and `<2` is the only value that keeps `predict()` working there. The
+# proposal was declined in #2 for that reason; if it appears again, the answer has not changed.
 onnx = ["onnx", "onnxruntime", "onnxscript",
         "numpy<2; platform_system == 'Darwin' and platform_machine == 'x86_64'"]
 
