@@ -6,6 +6,23 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.13] - 2026-11-06
+
+**No package code changes.** A cold-start timeout fixed, and a first-run runbook written.
+
+`.NET`'s `goldens` job now has 120 minutes instead of 60. It does serially what seven cells used to do
+in parallel — on a cold export cache it pays for three checkpoints across two layouts itself, and
+`rust.yml` has measured the same exporters at 23m58s for english and 8m50s for multilingual when cold.
+60 minutes was sized for the recorder's steady state, not for the first run after a model-definition
+change, and a timeout there would have surfaced as a failing lane with nothing wrong in the code.
+
+`docs/ci.md` gained "Turning it back on": what each workflow is expected to report on the first push
+after a pause, the two dispatch commands that reach the recorder and benchmark lanes a push cannot, the
+note that both are cold on that first run, and the four failure shapes that are not code failures — the
+billing message, a `skipped` breadth job, a `cancelled` run superseded on its ref, and a truncated
+Hugging Face download inside a recorder.
+
+
 ## [4.0.12] - 2026-11-06
 
 **No package code changes.** The documentation caught up with the code.

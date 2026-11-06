@@ -50,7 +50,11 @@ jobs:
   goldens:
     name: goldens (recorded once for every cell)
     runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
-    timeout-minutes: 60
+    # 120, not 60, because this job now does serially what seven cells used to do in parallel: on a
+    # cold export cache it pays for three checkpoints x two layouts itself. rust.yml measured the
+    # same exporters at 23m58s for english and 8m50s for multilingual cold, so a first run after a
+    # model-definition change can spend most of an hour here before the first golden is written.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

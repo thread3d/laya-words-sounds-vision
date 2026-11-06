@@ -144,6 +144,41 @@ Budgets today: **13 jobs** for a push to `main` (**3** more if that commit is ta
 pull request, **66** for the weekly crons. The script runs in the CI lint job, so a lane cannot
 quietly rejoin the push path; raise a budget in the same change that earns it.
 
+## Turning it back on
+
+Actions has been off long enough that this tree has never run: every lane here was edited while it was
+disabled, and every gate in this repository is therefore a *local* gate. The first push after
+re-enabling is the first machine evidence, so it is worth knowing what working looks like.
+
+| workflow | on the first push |
+|---|---|
+| `CI` | 6 jobs — `lint`, `tests (py3.11)`, `package`, `TypeScript (node22)`, `Python SDK (ubuntu-latest, py3.11)`, `Chinese benchmark audit`. The ONNX export, evals, Windows and both SDK breadth lanes report **skipped**: they are pull-request, dispatch and cron lanes |
+| `Docker` | 2 jobs — x86 smoke and HTTP; the arm runner and the Spark build are skipped |
+| `Security` | 3 jobs — secret scan, unsafe-deserialization, `CodeQL (python)` |
+| `Docs` | the strict build; the deploy reports **skipped** unless `vars.LAYA_PAGES` is set |
+| `C++`, `.NET`, `Go`, `Java`, `Rust` | absent — they are a weekly report |
+
+Then prove the paths a push cannot reach:
+
+```bash
+gh workflow run "Rust"  --ref main   # a recorder lane end to end: the goldens job, the artifact, the cells
+gh workflow run "Bench" --ref main   # the benchmark lane and its artifact
+```
+
+Both are cold on the first run: the .NET and Rust recorders restore no ONNX cache, so they export the
+graphs themselves, which is the case their timeouts are sized for and much slower than the steady state.
+
+Four shapes that are **not** code failures, in the order they are likely to appear:
+
+- `The job was not started because recent account payments have failed or your spending limit needs to
+  be increased` — the bill, again. No workflow edit changes it; [the allowance section](#when-the-allowance-runs-out)
+  has the two ways out.
+- `skipped` on a breadth job — correct. It is not a push lane.
+- `cancelled` with no failing step — a newer push superseded it on the same ref. That is 4.0.1's
+  concurrency change doing its job.
+- a truncated Hugging Face download inside a recorder — it fails at the fetch and names the file. Re-run;
+  if it repeats, `HF_TOKEN` is missing or the anonymous rate limit is being hit.
+
 ## When the allowance runs out
 
 The bill is account-level, so no workflow edit lifts the block. Either raise the spending limit
