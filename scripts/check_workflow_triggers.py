@@ -17,6 +17,10 @@ What this enforces:
 * A commit pushed to `main` and then tagged costs at most `--max-main-jobs` jobs for the branch
   push and `--max-tag-jobs` for the tag push. The budgets are the ratchet: a workflow that adds a
   matrix leg has to say so here.
+* A push-triggered lane supersedes the previous run on the same ref instead of queueing behind it:
+  `concurrency.group` keyed on `github.ref` (plus `github.event_name` where a cron shares the lane)
+  and `cancel-in-progress: true`. Grouping by `github.sha`, which is what these lanes used to do,
+  gives every commit its own group, so five quick pushes bill five full matrices.
 
 Job counts are matrix-expanded exactly as Actions expands them (the product of the dimensions,
 plus every `include:` entry that names a combination the matrix does not already produce), so the
@@ -39,6 +43,12 @@ TAG = "v9.9.9"
 
 MAIN_PUSH_JOB_BUDGET = 70
 TAG_PUSH_JOB_BUDGET = 5
+
+# A push run in these lanes does something that must not stop halfway. `docs.yml`'s `deploy` job
+# publishes the Pages site, and a half-cancelled deploy is a broken site rather than a duplicated
+# verdict, so that lane keeps `cancel-in-progress` off for pushes and serialises instead. It costs
+# two jobs per push, which the budget can afford.
+KEEP_RUNNING_ON_PUSH = {"docs.yml"}
 
 ABSENT = object()
 
@@ -171,15 +181,27 @@ def violations(rows, max_main, max_tag):
         # Only branch pushes supersede each other. A release run must NOT: two tags pointing at
         # different commits are two things to publish, so cancelling one would lose a release.
         concurrency = row["doc"].get("concurrency") or {}
-        if row["main"] and (
-            not isinstance(concurrency, dict)
-            or "group" not in concurrency
-            or "cancel-in-progress" not in concurrency
-        ):
-            problems.append(
-                f"{where}: runs on a push without a `concurrency:` group and `cancel-in-progress:`, "
-                f"so a burst of pushes queues every commit's full matrix instead of superseding it."
-            )
+        group = concurrency.get("group", "") if isinstance(concurrency, dict) else ""
+        group = group if isinstance(group, str) else ""
+        cancel = concurrency.get("cancel-in-progress") if isinstance(concurrency, dict) else None
+        if row["main"]:
+            if "github.ref" not in group or "github.sha" in group:
+                problems.append(
+                    f"{where}: the `concurrency:` group is not keyed on `github.ref`, so each commit "
+                    f"gets its own group and a burst of pushes queues every commit's {row['jobs']} "
+                    f"jobs instead of superseding the previous one."
+                )
+            if row["file"] not in KEEP_RUNNING_ON_PUSH and cancel is not True:
+                problems.append(
+                    f"{where}: `cancel-in-progress` is not `true` for pushes, so the previous run on "
+                    f"the same ref keeps billing after a newer commit arrives."
+                )
+            if "schedule" in events(row["doc"]) and "github.event_name" not in group:
+                problems.append(
+                    f"{where}: runs on both a schedule and a push but its group omits "
+                    f"`github.event_name`, so the cron run and the push run collide and one cancels "
+                    f"the other."
+                )
     main_total = sum(row["jobs"] for row in rows if row["main"])
     tag_total = sum(row["jobs"] for row in rows if row["tag"])
     if main_total > max_main:

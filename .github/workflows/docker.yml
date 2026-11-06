@@ -5,10 +5,11 @@ on:
   push:
     branches: [main]
 
-# Cancel outdated pull request runs; on main, run per commit.
+# Supersede, don't queue: a burst of pushes bills every commit's matrix when each gets its own
+# group, and on a private repository those minutes are the allowance. See ci.yml for the full note.
 concurrency:
-  group: docker-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: docker-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

@@ -25,9 +25,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: dotnet-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  # Cancel outdated pull request runs. Pushes get a per-commit group so each one finishes.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: dotnet-${{ github.event_name }}-${{ github.ref }}
+  # Supersede, don't queue: a burst of pushes otherwise bills every commit's matrix (see ci.yml).
+  # The old note here said pushes get a per-commit group so each one finishes; that is the behaviour
+  # the private-repo minute allowance cannot pay for.
+  cancel-in-progress: true
 
 env:
   # transformers probes for TensorFlow at import; when TF is present its abseil runtime can

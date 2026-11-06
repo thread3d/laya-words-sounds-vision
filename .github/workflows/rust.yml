@@ -15,8 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: rust-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: rust-${{ github.event_name }}-${{ github.ref }}
+  # Supersede, don't queue: a burst of pushes otherwise bills every commit's matrix (see ci.yml).
+  cancel-in-progress: true
 
 env:
   USE_TF: "0"

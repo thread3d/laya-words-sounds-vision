@@ -7,10 +7,12 @@ on:
   schedule:
     - cron: "17 6 * * 1"     # Monday morning: catch CVEs disclosed since the last push
 
-# Cancel outdated pull request runs; on main, run per commit.
+# Supersede, don't queue (see ci.yml). `github.event_name` is in the group because this lane also
+# runs on a cron: without it, a Monday scan and a push to main would share one group and the scan
+# would cancel the push run.
 concurrency:
-  group: security-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: security-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Read-only by default. Jobs that need more ask for it explicitly.
 permissions: read-all

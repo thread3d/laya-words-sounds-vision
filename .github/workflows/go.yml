@@ -43,8 +43,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: go-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: go-${{ github.event_name }}-${{ github.ref }}
+  # Supersede, don't queue: a burst of pushes otherwise bills every commit's matrix (see ci.yml).
+  cancel-in-progress: true
 
 env:
   # transformers probes for TensorFlow at import; when TF is present its abseil runtime can

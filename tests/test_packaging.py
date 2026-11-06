@@ -1110,14 +1110,21 @@ for _dirpath, _dirnames, _filenames in os.walk("."):
 check("extras/every referenced extra is declared",
       sorted(set(_referenced_extras) - _declared_extras), [])
 
-# ------------------------------------------------------- push concurrency (#399)
-# github.ref is refs/heads/main for every push, so a group of <workflow>-${{ github.ref }}
-# is one group for the whole branch. Rapid merges then cancel each other. Pull requests
-# stay on github.ref (a new commit still cancels the obsolete run); pushes use github.sha.
-# docs.yml has a concurrency group and is included once that group uses this expression.
-# It still deploys GitHub Pages on github.ref so an older build cannot publish over a
-# newer one (#493 left that group ref-scoped on purpose).
-_PER_COMMIT = "github.event_name == 'pull_request' && github.ref || github.sha"
+# ------------------------------------------------------- push concurrency (#399, reversed)
+# #399 grouped pushes by `github.sha` so that rapid merges would not cancel each other: every commit
+# got its own group and each started run finished. That is the right trade for a repository with
+# unlimited minutes and the wrong one for this repository, which is private and bills them. Five
+# pushes in a row queued five full matrices -- 5 x 66 jobs -- and the bill is what stopped every
+# workflow here ("The job was not started because recent account payments have failed...", with no
+# step ever running).
+#
+# The group is now keyed on `github.ref`, so a push supersedes the previous run on the same ref and
+# at most one commit's matrix is in flight. `github.event_name` is in the group as well, because a
+# ref-only group also collapses runs that are not obsolete at all: the weekly `security.yml` scan
+# and a push to main share `refs/heads/main`, and a `workflow_dispatch` on main shares it with
+# both. docs.yml is deliberately NOT in this list -- its push run deploys GitHub Pages, so it
+# serialises instead of superseding (#493), and cancelling it halfway would leave a broken deploy
+# rather than a duplicated verdict.
 _BARE_REF_GROUP = re.compile(
     r"(?m)^[ \t]*group:\s+\S+-\$\{\{\s*github\.ref\s*\}\}(?:\s+#.*)?\s*$"
 )
@@ -1128,29 +1135,27 @@ def _concurrency_block(text):
     return match.group(0) if match else ""
 
 
-_concurrency_workflows = ["ci.yml", "docker.yml", "security.yml"]
-require_repo(os.path.join(".github", "workflows", "ci.yml"),
-             os.path.join(".github", "workflows", "docker.yml"),
-             os.path.join(".github", "workflows", "security.yml"),
-             os.path.join(".github", "workflows", "docs.yml"))
-_docs_workflow = read(os.path.join(".github", "workflows", "docs.yml"))
-_docs_concurrency = _concurrency_block(_docs_workflow)
-if _docs_concurrency and _PER_COMMIT in _docs_concurrency:
-    _concurrency_workflows.append("docs.yml")
+_concurrency_workflows = ["ci.yml", "cpp.yml", "docker.yml", "dotnet.yml", "go.yml", "java.yml",
+                          "rust.yml", "security.yml"]
+require_repo(*[os.path.join(".github", "workflows", _wf) for _wf in _concurrency_workflows])
 
 for _wf in _concurrency_workflows:
-    _text = _docs_workflow if _wf == "docs.yml" else read(os.path.join(".github", "workflows", _wf))
-    _block = _docs_concurrency if _wf == "docs.yml" else _concurrency_block(_text)
+    _block = _concurrency_block(read(os.path.join(".github", "workflows", _wf)))
     _stem = _wf[:-4]
     check_true(
-        "%s/per-commit concurrency for pushes to main" % _wf,
-        ("group: %s-${{ %s }}" % (_stem, _PER_COMMIT)) in _block,
-        "want group: %s-${{ %s }}" % (_stem, _PER_COMMIT),
+        "%s/pushes supersede on the same ref" % _wf,
+        ("group: %s-${{ github.event_name }}-${{ github.ref }}" % _stem) in _block,
+        "want group: %s-${{ github.event_name }}-${{ github.ref }}" % _stem,
+    )
+    check_true(
+        "%s/cancels the superseded push" % _wf,
+        re.search(r"(?m)^[ \t]*cancel-in-progress:\s*true\s*$", _block) is not None,
+        "cancel-in-progress must be a literal true, or the previous run on this ref keeps billing",
     )
     check_true(
         "%s/concurrency group is not github.ref alone" % _wf,
         _block != "" and _BARE_REF_GROUP.search(_block) is None,
-        "a ref-only group collapses every push to main into one run",
+        "a ref-only group also cancels a cron scan or a dispatch on the same ref",
     )
 
 # ------------------------------------------------- the eval gate is not cancelled mid-run

@@ -9,10 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  # Cancel outdated pull request runs. On main, use a per-commit group so each push
-  # gets its own run and started runs finish without cancelling or being cancelled by adjacent merges.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  # Supersede, don't queue. The previous form grouped pushes by commit sha, so five pushes in a row
+  # queued five full matrices instead of cancelling the first four -- and on a private repository
+  # every one of those minutes is billed, which is how this repository exhausted its Actions
+  # allowance. What superseding gives up is a finished verdict on a commit that is no longer the
+  # tip; the tip is the commit that matters. `github.event_name` is in the group so a manual
+  # dispatch or a cron scan cannot cancel a push run on the same ref.
+  cancel-in-progress: true
 
 env:
   # transformers probes for TensorFlow at import; when TF is present its abseil runtime can
