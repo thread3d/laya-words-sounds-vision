@@ -762,8 +762,10 @@ Golden vectors are read from `tests/golden/<checkpoint>/` (recorded from Python 
 root looking for `onnx/<checkpoint>/`. Tests whose artifacts are missing print a `skip:` line and
 return, rather than failing — a machine with no exported checkpoints still gets a green Tier-1 run.
 
-The advisory [Rust parity lane](../.github/workflows/rust.yml) runs on **every push and PR**,
-with no path filter. It is sharded per checkpoint (english, multilingual, typed-decisions, plus
+The advisory [Rust parity lane](../.github/workflows/rust.yml) runs **weekly** (Monday 04:00 UTC)
+and on demand, over the whole tree, with no path filter — `docs/ci.md` explains why the port lanes
+are a weekly report rather than a per-commit gate. It is sharded per checkpoint (english,
+multilingual, typed-decisions, plus
 a router cell for the tests that load english and multilingual together). Each cell regenerates
 its own checkpoint's goldens, and the routing goldens, from the Python `laya/` at that commit
 using [`tools/regen_golden.py`](tools/regen_golden.py), then runs the Cargo tests with

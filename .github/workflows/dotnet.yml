@@ -1,9 +1,10 @@
 name: .NET
 
 # Parity lane for laya-dotnet. The golden fixtures under laya-dotnet/tests/Laya.Tests/golden are
-# recorded from the Python `laya` package, so this runs on EVERY branch push and pull request (no
-# path filter): a change to laya/ that moves what the goldens capture shows up here rather than as
-# silent drift. Each run re-records the goldens from the Python code at that commit
+# recorded from the Python `laya` package, so this reports weekly over the whole tree (no path
+# filter) and on demand: a change to laya/ that moves what the goldens capture turns up in the
+# weekly drift report rather than as silent drift. Each run re-records the goldens from the Python
+# code at that commit
 # (tools/regen_golden.py) and runs the C# tests against the fresh copies.
 #
 # ADVISORY, not blocking. Both jobs carry `continue-on-error`, so this lane reports drift and
@@ -14,11 +15,11 @@ name: .NET
 # goes red, the fix is a follow-up port, not a revert of the Python change.
 
 on:
-  pull_request:
-  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
-  # built (36 wasted jobs on the v4.0.0 tag). release.yml is the only workflow a tag starts.
-  push:
-    branches: [main]
+  # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
+  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
+  # goldens from the Python package. See docs/ci.md.
+  schedule:
+    - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:

@@ -26,4 +26,6 @@ nav:
   - Fine-tuning:
       - finetune.md
       - finetune_browser_agent.md
+  - Development:
+      - ci.md
   - reference

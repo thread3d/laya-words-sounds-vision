@@ -1075,8 +1075,9 @@ A diff in `git diff -- laya-dotnet/tests/Laya.Tests/golden` after
 regenerating is expected whenever the Python behavior changed on purpose; review it, and commit it
 together with the C# change that follows it.
 
-`.github/workflows/dotnet.yml` runs the same chain on every push and pull request (there is no path
-filter, so a change under `laya/` triggers it): the `build` job re-records the routing goldens,
+`.github/workflows/dotnet.yml` runs the same chain **weekly** (Monday 04:00 UTC) and on demand —
+`gh workflow run ".NET" --ref <branch>` — over the whole tree, with no path filter, so a change under
+`laya/` is covered by the next weekly report: the `build` job re-records the routing goldens,
 builds the whole solution with warnings as errors and runs the tests that need no model; one
 `parity` job per checkpoint and layout (fused, split), and one for the router end-to-end tests
 (which need english and multilingual together), exports that checkpoint, re-records its goldens

@@ -6,6 +6,39 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.1] - 2026-11-06
+
+**No package code changes.** This release is about what runs in CI, when it runs, and what it costs —
+which had become the thing blocking everything else. Every workflow had been red for hours with
+`steps: 0` on each job, refused for an account reason: *"The job was not started because recent
+account payments have failed or your spending limit needs to be increased."* No language toolchain,
+build or test had executed. The allowance had been spent at roughly **102 jobs per commit**.
+
+What changed:
+
+* **A tag push no longer re-runs the branch lanes.** Five lanes declared a bare `on: push:`, which
+  Actions reads as "any push" — so tagging `v4.0.0` asked for 36 more jobs against the tree the
+  branch push had just built. Tag pushes now cost 3 jobs (`release.yml` only).
+* **A push supersedes the run it made obsolete.** Push concurrency was grouped by `github.sha`
+  (#399), so every commit got its own group and five quick pushes queued five full matrices. It is
+  now keyed on `github.event_name` + `github.ref` with `cancel-in-progress: true`. The trade,
+  stated plainly: a commit that is no longer the tip loses its verdict, and the tip is what matters.
+* **The five port lanes are off the per-commit path.** They were 33 of the 66 jobs a push to `main`
+  asked for, every one of their failure-capable jobs is advisory, and each matrix cell re-records
+  its goldens from the Python package. They now report weekly over the whole tree and on demand
+  (`gh workflow run "Java" --ref <branch>`): a push to `main` costs **33** jobs, down from 66.
+* **`scripts/check_workflow_triggers.py`** is the guard, and runs in the CI lint job. It parses
+  every workflow, matrix-expands it the way Actions does, and fails if a `push:` loses its
+  branch/tag filter, if a non-release workflow fires on tags, if a lane stops superseding on its
+  ref, if a frozen port rejoins the push path, or if a push/tag/weekly budget is exceeded.
+* **`docs/ci.md`** states which gate is blocking, which is a weekly report, what one commit costs,
+  and what to do when the allowance runs out again.
+* **The workflows pass `actionlint`.** One finding (shellcheck SC1007 on an intentionally empty
+  `LAYA_API_KEY=`) is fixed rather than suppressed.
+
+Measured for one commit, pushed to `main` and then tagged: **102 jobs → 36**, with the weekly
+crons at 41.
+
 ## [4.0.0] - 2026-11-06
 
 The sound path, **verified on the hardware it will run on**. 3.0 shipped the modality and 3.1 took it

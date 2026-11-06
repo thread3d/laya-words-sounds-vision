@@ -21,6 +21,12 @@ What this enforces:
   `concurrency.group` keyed on `github.ref` (plus `github.event_name` where a cron shares the lane)
   and `cancel-in-progress: true`. Grouping by `github.sha`, which is what these lanes used to do,
   gives every commit its own group, so five quick pushes bill five full matrices.
+* The five port lanes are frozen off the push and pull-request path: they report weekly and on
+  demand. Every job in them is advisory, so no verdict they produce can block a pull request or a
+  release, while each matrix cell re-records its goldens from the Python package. They were 33 of
+  the 66 jobs a push to `main` asked for.
+* Scheduled breadth is budgeted separately (`--max-weekly-jobs`), because moving a lane to a cron
+  moves its cost rather than deleting it.
 
 Job counts are matrix-expanded exactly as Actions expands them (the product of the dimensions,
 plus every `include:` entry that names a combination the matrix does not already produce), so the
@@ -41,14 +47,21 @@ WORKFLOW_DIR = os.path.join(ROOT, ".github", "workflows")
 # `laya-ts-v*` deliberately do not match it, so the SDK releases are not counted here.
 TAG = "v9.9.9"
 
-MAIN_PUSH_JOB_BUDGET = 70
+MAIN_PUSH_JOB_BUDGET = 36
 TAG_PUSH_JOB_BUDGET = 5
+WEEKLY_JOB_BUDGET = 45
 
 # A push run in these lanes does something that must not stop halfway. `docs.yml`'s `deploy` job
 # publishes the Pages site, and a half-cancelled deploy is a broken site rather than a duplicated
 # verdict, so that lane keeps `cancel-in-progress` off for pushes and serialises instead. It costs
 # two jobs per push, which the budget can afford.
 KEEP_RUNNING_ON_PUSH = {"docs.yml"}
+
+# The parity lanes for the six ports. Each is advisory end to end or nearly so (a port that goes red
+# is a follow-up port, not a revert), and each re-records its goldens from the Python package in
+# every matrix cell, which is the most expensive thing this repository runs. They report weekly and
+# on demand; docs/ci.md says what that means for a maintainer.
+FROZEN_PORTS = {"cpp.yml", "dotnet.yml", "go.yml", "java.yml", "rust.yml"}
 
 ABSENT = object()
 
@@ -147,25 +160,35 @@ def collect():
             continue
         path = os.path.join(WORKFLOW_DIR, name)
         doc = load(path)
+        names = events(doc)
         rows.append(
             {
                 "file": name,
                 "doc": doc,
                 "main": fires_on_main(doc),
                 "tag": fires_on_tag(doc),
+                "weekly": "schedule" in names,
+                "pr": "pull_request" in names,
                 "jobs": job_count(doc),
             }
         )
     return rows
 
 
-def violations(rows, max_main, max_tag):
+def violations(rows, max_main, max_tag, max_weekly):
     problems = []
     for row in rows:
+        where = f".github/workflows/{row['file']}"
+        if row["file"] in FROZEN_PORTS and (row["main"] or row["pr"]):
+            paths = "+".join(name for name, on_it in (("push", row["main"]), ("pull_request", row["pr"])) if on_it)
+            problems.append(
+                f"{where}: a frozen port lane is back on the {paths} path ({row['jobs']} jobs). Its "
+                f"verdicts are advisory, so they cannot block anything; it belongs on `schedule` + "
+                f"`workflow_dispatch` only (see docs/ci.md)."
+            )
         filters = push_filters(row["doc"])
         if filters is None:
             continue
-        where = f".github/workflows/{row['file']}"
         release = row["file"].startswith("release")
         if not filters:
             problems.append(
@@ -204,36 +227,46 @@ def violations(rows, max_main, max_tag):
                 )
     main_total = sum(row["jobs"] for row in rows if row["main"])
     tag_total = sum(row["jobs"] for row in rows if row["tag"])
+    weekly_total = sum(row["jobs"] for row in rows if row["weekly"])
     if main_total > max_main:
         problems.append(f"a push to main asks for {main_total} jobs, budget is {max_main}")
     if tag_total > max_tag:
         problems.append(f"tagging a commit asks for {tag_total} more jobs, budget is {max_tag}")
-    return problems, main_total, tag_total
+    if weekly_total > max_weekly:
+        problems.append(f"the weekly crons ask for {weekly_total} jobs, budget is {max_weekly}")
+    return problems, main_total, tag_total, weekly_total
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--max-main-jobs", type=int, default=MAIN_PUSH_JOB_BUDGET)
     ap.add_argument("--max-tag-jobs", type=int, default=TAG_PUSH_JOB_BUDGET)
+    ap.add_argument("--max-weekly-jobs", type=int, default=WEEKLY_JOB_BUDGET)
     args = ap.parse_args()
 
     rows = collect()
     width = max(len(row["file"]) for row in rows)
-    print(f"{'workflow'.ljust(width)}  push:main  push:tag  jobs")
+    print(f"{'workflow'.ljust(width)}  push:main  push:tag  weekly  jobs")
     for row in rows:
         print(
             f"{row['file'].ljust(width)}  {'yes' if row['main'] else '-':^9}  "
-            f"{'yes' if row['tag'] else '-':^8}  {row['jobs']:>4}"
+            f"{'yes' if row['tag'] else '-':^8}  {'yes' if row['weekly'] else '-':^6}  {row['jobs']:>4}"
         )
-    problems, main_total, tag_total = violations(rows, args.max_main_jobs, args.max_tag_jobs)
+    problems, main_total, tag_total, weekly_total = violations(
+        rows, args.max_main_jobs, args.max_tag_jobs, args.max_weekly_jobs
+    )
     print(f"\none commit, pushed to main then tagged: {main_total} + {tag_total} jobs")
+    print(f"the weekly crons: {weekly_total} jobs")
 
     if problems:
         print(f"\nFAIL: {len(problems)} problem(s)")
         for problem in problems:
             print(f"  * {problem}")
         return 1
-    print(f"OK: triggers within budget (main {main_total}<={args.max_main_jobs}, tag {tag_total}<={args.max_tag_jobs})")
+    print(
+        f"OK: within budget (main {main_total}<={args.max_main_jobs}, "
+        f"tag {tag_total}<={args.max_tag_jobs}, weekly {weekly_total}<={args.max_weekly_jobs})"
+    )
     return 0
 
 

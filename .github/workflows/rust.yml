@@ -1,14 +1,14 @@
 name: Rust
 
 # Python is the product; Rust follows it. Report parity drift without blocking
-# Python improvements. Always regenerate fixtures from this checkout, never cache
-# goldens or quietly pass model-backed tests with missing artifacts.
+# Python improvements, weekly and on demand. Always regenerate fixtures from this
+# checkout, never cache goldens or quietly pass model-backed tests with missing artifacts.
 on:
-  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
-  # built. release.yml is the only workflow a tag starts.
-  push:
-    branches: [main]
-  pull_request:
+  # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
+  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
+  # fixtures from the Python package. See docs/ci.md.
+  schedule:
+    - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:

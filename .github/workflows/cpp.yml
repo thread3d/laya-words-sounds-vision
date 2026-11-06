@@ -1,9 +1,11 @@
 name: C++
 
-# Build lane for laya-cpp. Like the Go, .NET and Java lanes it runs on every branch push and pull
-# request with no path filter. This first change carries a skeleton only (no library code, no goldens, no
-# ONNX Runtime), so there is no parity against the Python reference yet; what the lane proves is
-# that the toolchain builds, tests run, and the numeric flags are in force.
+# Build lane for laya-cpp. Like the Go, .NET and Java lanes it reports weekly over the whole tree
+# (no `paths:` filter) and can be dispatched by hand. It is not on the push or pull-request path:
+# every job here is advisory, so it cannot block anything. This first change carries a skeleton
+# only (no library code, no goldens, no ONNX Runtime), so there is no parity against the Python
+# reference yet; what the lane proves is that the toolchain builds, tests run, and the numeric
+# flags are in force.
 #
 # The build job is ADVISORY (`continue-on-error`) for the reason the other ports are: the Python
 # package is the product and the port follows it.
@@ -28,12 +30,13 @@ name: C++
 # row in security.yml's `codeql` matrix (it needs a manual build step and the maintainer's yes).
 
 on:
-  pull_request:
-  # Branch pushes only. With no filter here a `v*` tag push re-runs this lane for the commit the
-  # branch push just built -- 36 wasted jobs on the v4.0.0 tag alone -- and release.yml is the only
-  # workflow a tag should start. See scripts/check_workflow_triggers.py.
-  push:
-    branches: [main]
+  # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
+  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
+  # goldens from the Python package -- the most expensive thing this repository runs. On a private
+  # repository those minutes are billed: the five port lanes were 33 of the 66 jobs one push to
+  # main asked for. See docs/ci.md and scripts/check_workflow_triggers.py.
+  schedule:
+    - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:

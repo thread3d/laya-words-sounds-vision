@@ -1,21 +1,21 @@
 name: Java
 
 # Parity lane for laya-java. The fixtures under laya-java/fixtures are recorded FROM the Python
-# `laya` package, so this runs on every branch push and pull request with no path filter: a change to
-# laya/ that moves what the fixtures capture shows up here rather than as silent drift. Each run
-# re-records them from the Python code at that commit and runs the Java tests against the fresh
-# copies.
+# `laya` package, so this reports weekly and on demand over the whole tree (no path filter): a
+# change to laya/ that moves what the fixtures capture turns up in the weekly report, not as silent
+# drift. Each run re-records them from the Python code at that commit and runs the Java tests
+# against the fresh copies.
 #
 # ADVISORY, not blocking, for the same reason the .NET lane is: the Python package is the product
 # and laya-java follows it, so a Python-side improvement must not be blocked on a port catching up.
 # When this lane goes red the fix is a follow-up port, not a revert of the Python change.
 
 on:
-  pull_request:
-  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
-  # built (36 wasted jobs on the v4.0.0 tag). release.yml is the only workflow a tag starts.
-  push:
-    branches: [main]
+  # Weekly report, and on demand. Every job in this lane is advisory (`continue-on-error`), so
+  # nothing it reports can block a pull request or a release, while each matrix cell re-records its
+  # goldens from the Python package. See docs/ci.md.
+  schedule:
+    - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
 #
 # SUPPLY CHAIN: `laya-java/gradle/wrapper/gradle-wrapper.jar` is a binary that executes at build

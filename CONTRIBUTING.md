@@ -87,6 +87,20 @@ ruff check laya/ --select=E9,F63,F7,F82,F401,F811 --line-length=120
 python -m compileall -q laya/ tests/
 ```
 
+## Continuous integration
+
+What has to be green, what reports weekly, and what a commit costs is
+[`docs/ci.md`](docs/ci.md). Two things are worth knowing before you touch a workflow:
+
+- **Breadth is not paid for per commit.** The port lanes (`cpp`, `dotnet`, `go`, `java`, `rust`)
+  report weekly and on demand — `gh workflow run "Java" --ref <branch>` — because every verdict they
+  produce is advisory and each one re-records its goldens from the Python package. They were 33 of
+  the 66 jobs a push to `main` used to ask for.
+- **`python scripts/check_workflow_triggers.py` is the guard.** It prints the cost of a push, a tag
+  and the weekly crons, and fails if a lane loses its branch filter, re-runs on a tag, queues behind
+  an older commit on the same ref, rejoins the push path as a frozen port, or pushes a budget over
+  its limit. The CI lint job runs it; run it locally before pushing a workflow change.
+
 ## Documentation
 
 The documentation in [`docs/`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs) builds

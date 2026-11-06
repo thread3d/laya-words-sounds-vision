@@ -1,7 +1,7 @@
 name: Go
 
-# Parity lane for laya-go. Like the .NET and Java lanes, this runs on every branch push and pull
-# request with no path filter, and re-records the goldens from the Python `laya` package at THAT commit
+# Parity lane for laya-go. Like the .NET and Java lanes, this reports weekly over the whole tree
+# and on demand, and re-records the goldens from the Python `laya` package at THAT commit
 # before the Go tests read them. The goldens are never taken from disk:
 #
 #   * laya-java/scripts/gen_fixtures.py records the families laya-go shares with the other ports
@@ -20,7 +20,7 @@ name: Go
 #
 # Three things hold the lane honest, each there because a green run could otherwise mean nothing:
 #
-#   * CI on every branch push: no `paths:` filter, so a change to laya/ that moves a golden shows up here
+#   * Weekly, whole tree: no `paths:` filter, so a change to laya/ that moves a golden shows up here
 #     and not as silent drift.
 #   * Goldens regenerated per commit: see above.
 #   * Fail on skip: `go test` reports a skipped test as success, so a run with no checkpoints is
@@ -32,11 +32,11 @@ name: Go
 # module can actually reach.
 
 on:
-  pull_request:
-  # Branch pushes only: a tag push must not re-run this lane for the commit the branch push just
-  # built. release.yml is the only workflow a tag starts.
-  push:
-    branches: [main]
+  # Weekly report, and on demand. Every job in this lane is advisory except the security scan, so
+  # nothing here blocks a pull request or a release, while each run re-records its goldens from the
+  # Python package. See docs/ci.md.
+  schedule:
+    - cron: "0 4 * * 1"       # Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:
