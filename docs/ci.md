@@ -90,11 +90,23 @@ to those families.
 Retention is one day on purpose: an artifact here is an input to this run's cells, not an archive,
 and artifact storage is billed the way minutes are.
 
-`tests/test_ci_record_once.py` is the guard: a consumer that downloads an artifact without
-`needs: goldens`, a cell that starts recording the shared set again, a cache entry the recorder warms
-under a key no cell restores, or a lane that half-migrates (consumers rewired, recorder missing)
-fails it. `java.yml` and `go.yml` still record per cell, and it reports that as a skip rather than
-passing silently.
+`java.yml` and `go.yml` need no recorder, because neither ever paid twice for a recording: java's
+three parity cells record **disjoint** `--only` sets (the tokenizer's six families, `predict`'s two,
+`typed-decisions`' one), and go has a single recording job. That is a second legitimate shape for the
+same rule, not an exception to it.
+
+`tests/test_ci_record_once.py` is the guard, and it enforces the rule rather than a job layout: **one
+write per fixture family per workflow**. It reads that out of the YAML — the families each job or
+matrix cell writes, from `--only` and `--checkpoint`, with a cell that passes a shell variable
+resolved through its own `checkpoints` value — and fails on a family recorded by two jobs, or twice
+inside one matrix unless that matrix is a declared graph-backed one. On top of that, where a recorder
+exists: a consumer that downloads an artifact without `needs: goldens`, a consumer that starts
+recording the shared set again, a cache entry the recorder warms under a key no cell restores, or a
+lane that half-migrates (consumers rewired, recorder missing).
+
+Run against the trees before each migration, it names the waste it was written for: `rust.yml`'s
+`routing` recorded four times with english and multilingual twice each, `dotnet.yml`'s english three
+times, and `cpp.yml`'s eight families recorded by both `build` and `onnx`.
 
 ## What one commit costs
 

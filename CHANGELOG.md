@@ -6,6 +6,28 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.6] - 2026-11-06
+
+**No package code changes.** Item 2 finishes: every port lane records each golden once, and a test
+now says so.
+
+`java.yml` and `go.yml` need no recording job, and this release is mostly the proof of that rather
+than another migration. Java's three parity cells record **disjoint** `--only` sets — the tokenizer's
+six families, `predict`'s two, `typed-decisions`' one — and go has a single recording job, so neither
+ever paid twice for a recording.
+
+What they lacked was the *rule*. The guard only knew about lanes with a `goldens` job and reported
+the rest as skips, which is how "three of five" looked like the state of the item. It now enforces
+what item 2 means — one write per fixture family per workflow — and derives the families from the
+YAML itself: `--only` for the fixture generators, `--checkpoint` for `regen_golden.py`, and a cell
+that passes a shell variable resolved through its own `checkpoints` value. Both shapes satisfy it: a
+recorder with consumers, or disjoint cells.
+
+Run against the trees from before each migration it names the waste it was written for — rust's
+`routing` recorded four times with english and multilingual twice each, dotnet's english three times,
+cpp's eight families recorded by both `build` and `onnx` — and adding one family to a second java
+cell fails it today. 58 checks, no skips.
+
 ## [4.0.5] - 2026-11-06
 
 **No package code changes.** The Rust lane records its goldens once.
