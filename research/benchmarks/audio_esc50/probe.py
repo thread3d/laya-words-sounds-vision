@@ -104,6 +104,57 @@ def extract_all(clips, workers, threads, limit=None):
                       flush=True)
 
 
+def extract_all_gpu(clips, device, batch_clips):
+    """Encode on one card -- one process, batched, and **padded by nothing**.
+
+    Batching is only free if every clip in the batch is the same length: wav2vec2's convolutional
+    front-end has no padding mask, so a shorter clip padded to its neighbour's length contributes
+    frames built from zeros and its pooled feature stops being the feature the CPU path produced.
+    Clips are therefore bucketed by exact sample count and batched inside a bucket. ESC-50 is one
+    bucket (every clip is five seconds); FSDD's half-second recordings bucket into a handful.
+    """
+    import torch
+    import gpu_patch
+
+    gpu_patch.install()
+    os.makedirs(FRAMES, exist_ok=True)
+    todo = [c for c in clips if not os.path.exists(
+        os.path.join(FRAMES, os.path.splitext(os.path.basename(c))[0] + ".npz"))]
+    if not todo:
+        print("frames: all %d clips already cached" % len(clips), flush=True)
+        return
+    from laya.audio import load_waveform
+    encoder = _encoder()
+    encoder.to(device)
+    encoder.eval()
+    print("frames: %d clips on %s, batch %d" % (len(todo), device, batch_clips), flush=True)
+    started = time.time()
+
+    waves = {path: load_waveform(path, SAMPLE_RATE) for path in todo}
+    buckets = {}
+    for path, wave in waves.items():
+        buckets.setdefault(int(wave.numel()), []).append(path)
+
+    done = 0
+    # Largest bucket first: a long run's progress is dominated by it.
+    for length in sorted(buckets, key=lambda n: len(buckets[n]), reverse=True):
+        paths = buckets[length]
+        for start in range(0, len(paths), batch_clips):
+            chunk = paths[start:start + batch_clips]
+            batch = torch.stack([waves[path] for path in chunk]).to(device)
+            with torch.no_grad():
+                frames = encoder.encode_frames(batch)
+            frames = frames.float().cpu().numpy().astype("float16")
+            for i, path in enumerate(chunk):
+                stem = os.path.splitext(os.path.basename(path))[0]
+                np.savez(os.path.join(FRAMES, stem + ".npz"), frames=frames[i])
+            done += len(chunk)
+            if done % 200 < batch_clips or done == len(todo):
+                rate = done / max(1e-9, time.time() - started)
+                print("  %d/%d  %.2f clips/s  (%d length bucket(s))"
+                      % (done, len(todo), rate, len(buckets)), flush=True)
+
+
 # -- the arms ---------------------------------------------------------------------------------
 
 def features(stem, mode):
@@ -270,6 +321,11 @@ def main(argv=None) -> int:
                         choices=["mean", "mean+std"])
     parser.add_argument("--limit", type=int, default=None,
                         help="encode at most this many new clips (a smoke test)")
+    parser.add_argument("--device", default="cpu",
+                        help="cpu (multiprocess workers, one thread pool each) or cuda (one process "
+                             "on one card, batched; needs the ROCm interpreter and gpu_patch.py)")
+    parser.add_argument("--batch-clips", type=int, default=8,
+                        help="clips per forward pass when --device is a GPU (default 8)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 8) // 8))
     parser.add_argument("--alphas", type=float, nargs="+", default=[1e-3, 1e-2, 1e-1, 1.0, 10.0])
@@ -278,7 +334,10 @@ def main(argv=None) -> int:
     if args.dataset == "fsdd":
         args.subsets, args.folds = ["fsdd"], [0]
     clips = _clip_list(args.subsets, args.folds, args.limit, args.dataset)
-    extract_all(clips, args.workers, args.threads)
+    if str(args.device).startswith("cuda"):
+        extract_all_gpu(clips, args.device, args.batch_clips)
+    else:
+        extract_all(clips, args.workers, args.threads)
 
     results = []
     for subset in args.subsets:

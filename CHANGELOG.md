@@ -6,6 +6,40 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.1.0] - 2026-11-05
+
+The audio benchmark harness runs on this machine's GPUs — 3x AMD gfx1030, 34 GB each — and the
+deferred arms become affordable.
+
+### Added
+
+- `research/benchmarks/audio_esc50/gpuenv.sh`, `gpu_patch.py` and `train_gpu.py`: the environment for
+  a GPU run, the MIOpen workaround it needs, and a `laya-train` entry point that installs it.
+- `--device` on `probe.py` and `eval_gate.py`, with a GPU extraction path that batches clips
+  **bucketed by exact sample count** (a padded clip's pooled feature is not the feature the CPU path
+  produced, because the conv front-end has no padding mask).
+- `run_gpu_arms.sh`: both benchmark arms, one per card.
+
+### Fixed (environment)
+
+- **`Conv1d` segfaults on every card here** (exit 139 before it can raise), and wav2vec2's feature
+  extractor is eight `Conv1d` layers, so every GPU audio run died before its first epoch. The
+  harness evaluates each conv as unfold + `bmm` — groups included, which a groups-1-only workaround
+  would not have survived — verified layer by layer against `conv1d` on the real weights (max |diff|
+  ≤ 2e-6). This is the same MIOpen defect the vision harness routes around with `tower_patch.py`.
+  The package does not carry it: the defect is this machine's MIOpen, not Laya's, and inference
+  through `laya.load` needs the same harness patch on such a build.
+
+### Measured
+
+| step | CPU (56 cores) | 1 GPU |
+|---|---|---|
+| tower, 5 s clip | ~1.7 s | **26 ms** (43 clips/s batched) |
+| training, 50-option row (~195 tokens) | 5.9 rows/s | **27.8-30.9 rows/s** |
+| training, 10-option row (~80 tokens) | 12.7-25.4 rows/s | **60-92 rows/s** |
+| training, 10-option `state_conditioned` | 42 rows/s | **145 rows/s** |
+| peak VRAM (encoder + tower, batch 48) | — | 18.3 GB |
+
 ## [3.0.1] - 2026-11-05
 
 ### Fixed

@@ -307,6 +307,23 @@ GPU, `ModernBERT-large` encoder):
 | 10 options (~80 tokens incl. the audio block) | 12.7 | **25.4** |
 | 50 options (~195 tokens) | **5.9** | 5.3 |
 
+With three AMD gfx1030 cards (34 GB each) available through this machine's ROCm build, the same
+shapes run 3-5x faster than on the 56-core CPU — and the tower 65x faster — which is what made the
+GPU-bound arms in this page affordable:
+
+| step | CPU | 1 GPU |
+|---|---|---|
+| tower, 5 s clip | ~1.7 s | **26 ms** |
+| training, 50-option row | 5.9 rows/s | **27.8-30.9 rows/s** |
+| training, 10-option row | 12.7-25.4 rows/s | **60-92 rows/s** |
+| training, 10-option `state_conditioned` | 42 rows/s | **145 rows/s** |
+
+One condition attaches, and it is this machine's: `Conv1d` segfaults through MIOpen here (exit 139,
+before it can raise), so the tower's conv front-end is evaluated as unfold + `bmm` by the harness's
+`gpu_patch.py` — verified layer by layer against `conv1d` on the real weights. The package does not
+carry that workaround, because the defect is the installed MIOpen and not Laya; see
+[the harness README](https://github.com/thread3d/laya-words-sounds-vision/tree/main/research/benchmarks/audio_esc50).
+
 Batching doubles the throughput of short rows and does nothing for long ones: a 50-option head is
 memory-bandwidth bound, so the only lever there is fewer epochs or a GPU. That is why the FSDD arms
 run at `--micro-batch 16` and the 50-way arm is quoted in hours.

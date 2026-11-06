@@ -72,11 +72,23 @@ def main(argv=None) -> int:
     parser.add_argument("--skip-flip", action="store_true", help="skip gate 2b")
     parser.add_argument("--min-gain", type=float, default=None, help="ask gate 1 for a verdict")
     parser.add_argument("--max-flip-rate", type=float, default=None, help="ask gate 2b for a verdict")
+    parser.add_argument("--device", default="cpu",
+                        help="torch device for the checkpoint, e.g. cpu or cuda (a GPU needs the "
+                             "ROCm interpreter and gpu_patch.py; see gpuenv.sh)")
+    parser.add_argument("--no-gpu-patch", action="store_true",
+                        help="do not install the harness's MIOpen conv workaround on a cuda device")
     parser.add_argument("--batch-size", type=int, default=1,
                         help="rows per forward pass in both gate passes (default 1); a CPU cannot "
                              "afford one pass per row at 50 options")
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
+
+    if str(args.device).startswith("cuda") and not args.no_gpu_patch:
+        # This machine's MIOpen segfaults on the tower's Conv1d front-end; the workaround is the
+        # harness's, not the package's (see gpu_patch.py and the README).
+        sys.path.insert(0, HERE)
+        import gpu_patch
+        gpu_patch.install()
 
     import laya
     from laya.evals import Dataset
@@ -88,7 +100,7 @@ def main(argv=None) -> int:
         dataset = Dataset(dataset.examples[:args.limit])
 
     started = time.time()
-    agent = laya.load(args.checkpoint, device="cpu")
+    agent = laya.load(args.checkpoint, device=args.device)
     load_seconds = time.time() - started
     runner = _Timed(agent)
 
@@ -99,6 +111,7 @@ def main(argv=None) -> int:
         "audio": getattr(agent.audio, "raw", None),
         "option_layout": agent.cfg.get("option_layout"),
         "load_seconds": round(load_seconds, 1),
+        "device": str(getattr(agent, "device", args.device)),
         "batch_size": args.batch_size,
     }
 

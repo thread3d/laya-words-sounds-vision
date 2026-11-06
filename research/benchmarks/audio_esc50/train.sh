@@ -80,7 +80,17 @@ echo "train=$train_rows"
 echo "eval=$eval_rows"
 echo "out=$out"
 
-"$REPO/.venv/bin/python" -m laya.train_cli \
+# `PYTHON` selects the interpreter: the repository's `.venv` is the CPU build the CI gates use, and
+# GPU runs need the ROCm interpreter (`source gpuenv.sh` sets PYTHON to it). A GPU run also goes
+# through `train_gpu.py`, which installs the MIOpen conv workaround -- without it the tower's
+# Conv1d front-end segfaults before the first epoch.
+PYTHON_BIN="${PYTHON:-$REPO/.venv/bin/python}"
+if [[ "${DEVICE:-cpu}" == cuda* ]]; then
+  CLI=("$HERE/train_gpu.py")
+else
+  CLI=(-m laya.train_cli)
+fi
+"$PYTHON_BIN" "${CLI[@]}" \
   --data "$train_rows" \
   --base "$BASE" \
   --out "$out" \
@@ -88,6 +98,6 @@ echo "out=$out"
   --option-layout "$layout" \
   --freeze-encoder \
   --epochs "$epochs" \
-  --device cpu \
+  --device "${DEVICE:-cpu}" \
   --eval "$eval_rows" \
   "${extra[@]}"

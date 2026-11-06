@@ -49,6 +49,40 @@ python3 research/benchmarks/audio_esc50/probe.py --limit 40 --workers 4
 python3 research/benchmarks/audio_esc50/eval_gate.py --checkpoint <ckpt> --rows esc10_fold1_eval.jsonl --limit 8 --skip-flip
 ```
 
+## Running on the GPUs
+
+This machine has 3x AMD gfx1030 (34 GB each) reached through the ROCm build in the miniconda
+interpreter; the repository's `.venv` is the CPU build the CI gates use.
+
+```bash
+source research/benchmarks/audio_esc50/gpuenv.sh     # PYTHON, LD_LIBRARY_PATH, HF_HOME, HSA override
+python3 research/benchmarks/audio_esc50/gpu_patch.py # tower on a card: 3 passes, prints timings
+./research/benchmarks/audio_esc50/run_gpu_arms.sh    # the two arms, one per card, in parallel
+```
+
+**The conv workaround is not optional on this build.** `torch.nn.Conv1d` segfaults here — a trivial
+single-layer conv on a 1-second input exits 139 before it can raise — and wav2vec2's feature
+extractor is eight `Conv1d` layers, so every audio run dies before its first epoch. The same defect
+is why the vision harness next door needs `tower_patch.py` for `Conv2d`; MIOpen reaches its workspace
+query and dumps core, and no MIOpen knob changes it. `gpu_patch.py` evaluates each conv as
+unfold + `bmm` (verified layer by layer against `conv1d` on the real weights, max |diff| ≤ 2e-6) and
+`train_gpu.py` installs it before handing over to `laya-train`. Inference through `laya.load` needs
+the same patch; the package does not carry it, because the defect is this machine's MIOpen and not a
+property of Laya.
+
+Measured here (one card of three, 34 GB):
+
+| step | CPU (56 cores) | 1 GPU |
+|---|---|---|
+| tower, 5 s clip (after warm-up) | ~1.7 s | **26 ms** (43 clips/s batched) |
+| training, 50-option row (~195 tokens) | 5.9 rows/s | **27.8-30.9 rows/s** |
+| training, 10-option row (~80 tokens) | 12.7-25.4 rows/s | **60-92 rows/s** |
+| training, 10-option `state_conditioned` (10 rows/item) | 42 rows/s | **145 rows/s** |
+| peak VRAM, encoder + tower + batch 48 | — | 18.3 GB |
+
+The tower gets its ~65x; the training step gets 3-5x, because what dominates there is the 335 M
+encoder's forward *and* backward, not the tower.
+
 ## Notes that cost time to learn
 
 * A 50-option head renders to 150 tokens, all 50 markers on a `[MASK]`, and crosses
