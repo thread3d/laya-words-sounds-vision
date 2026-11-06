@@ -852,15 +852,24 @@ def resample(waveform, from_rate: int, to_rate: int):
     if from_rate == to_rate or waveform.size(-1) == 0:
         return waveform
     ratio = to_rate / from_rate
+    was_1d = waveform.dim() == 1
+    if was_1d:
+        waveform = waveform.unsqueeze(0)          # [frames] is one channel, [1, frames]
     if ratio < 1:
         window = max(1, int(round(1.0 / ratio)))
         if window > 1:
-            kernel = torch.ones(1, 1, window, dtype=waveform.dtype) / window
+            # One kernel row per channel, filtered with `groups`: a `[channels, frames]` waveform is
+            # what `decode_waveform` returns, and a single-input-channel kernel raised
+            # "expected input[1, 2, N] to have 1 channels" on every stereo recording that needed a
+            # rate change -- a 44.1 kHz stereo phone clip, the shape a caller most often passes.
+            channels = waveform.size(0)
+            kernel = torch.ones(channels, 1, window, dtype=waveform.dtype) / window
             waveform = torch.nn.functional.conv1d(
-                waveform.unsqueeze(0), kernel, padding=window // 2).squeeze(0)
+                waveform.unsqueeze(0), kernel, padding=window // 2, groups=channels).squeeze(0)
     n_out = max(1, int(round(waveform.size(-1) * ratio)))
-    return torch.nn.functional.interpolate(
+    waveform = torch.nn.functional.interpolate(
         waveform.unsqueeze(0), size=n_out, mode="linear", align_corners=False).squeeze(0)
+    return waveform.squeeze(0) if was_1d else waveform
 
 
 def load_waveform(spec, sample_rate: int = 16000, max_seconds: Optional[float] = None,

@@ -801,6 +801,38 @@ def test_resampling_changes_the_length_and_keeps_the_tone():
     assert abs(hz - 440) < 40, hz
 
 
+def test_a_stereo_recording_survives_a_rate_change():
+    """The stereo downmix and the resampler disagreed about the shape between them.
+
+    `decode_waveform` returns `[channels, frames]` and `_finish_waveform` is what downmixes, but
+    `load_waveform` resamples *before* it downmixes. `resample`'s low-pass built a one-input-channel
+    kernel, so every recording that was both stereo and not already at the tower's rate raised
+    `expected input[1, 2, N] to have 1 channels` -- a 44.1 kHz stereo phone clip, which is the shape
+    a caller most often hands the decoder. The neighbouring test missed it because
+    `test_a_stereo_recording_is_downmixed_to_mono` passes `sample_rate=8000` and so never resamples.
+    """
+    from laya.audio import load_waveform
+
+    stereo = _wav_bytes(seconds=0.5, rate=44100, freq=440.0, channels=2)
+    waveform = load_waveform(stereo, sample_rate=16000)
+    assert waveform.dim() == 1, waveform.shape
+    assert abs(waveform.numel() - 8000) < 40, waveform.numel()
+    # The tone survives the low-pass and the interpolator: 440 Hz crosses zero 880 times a second.
+    signs = torch.sign(waveform)
+    crossings = int((signs[1:] != signs[:-1]).sum().item())
+    hz = crossings / 2.0 / (waveform.numel() / 16000)
+    assert abs(hz - 440) < 40, hz
+
+    # The resampler keeps the channel axis it documents, so a caller that resamples before
+    # downmixing sees the same shape the decoder handed it.
+    from laya.audio import decode_waveform, resample
+
+    samples, rate = decode_waveform(stereo)
+    assert samples.shape[0] == 2, samples.shape
+    out = resample(samples, rate, 16000)
+    assert out.shape[0] == 2 and abs(out.shape[1] - 8000) < 40, out.shape
+
+
 def test_the_waveform_path_is_capped_by_max_seconds():
     """A reference over the cap is *refused*; a caller-supplied waveform is *truncated*.
 
@@ -1009,6 +1041,7 @@ if __name__ == "__main__":
     test_a_pcm_wav_decodes_without_the_optional_decoder()
     test_every_pcm_width_decodes()
     test_a_stereo_recording_is_downmixed_to_mono()
+    test_a_stereo_recording_survives_a_rate_change()
     test_resampling_changes_the_length_and_keeps_the_tone()
     test_the_waveform_path_is_capped_by_max_seconds()
     test_peak_normalisation_makes_gain_irrelevant()
