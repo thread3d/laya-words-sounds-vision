@@ -4,6 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The full matrix runs weekly, and on demand. A push to main runs one cell of each matrix so the
+  # gate stays cheap enough to keep green on every commit; the breadth (other interpreters, other
+  # runners, the SDK integration lanes) belongs to a pull request, a dispatch, or this cron.
+  # docs/ci.md states the tiers and what each one costs.
+  schedule:
+    - cron: "0 5 * * 1"       # Monday 05:00 UTC, after the port lanes (04:00)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,7 +43,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ["20", "22"]
+        # One cell on a push, the full pair on a pull request, a cron or a dispatch. The form is the
+        # one scripts/check_workflow_triggers.py models: `github.event_name == 'push'` first.
+        node: ${{ github.event_name == 'push' && fromJSON('["22"]') || fromJSON('["20", "22"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -87,8 +96,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep this in lockstep with pyproject classifiers; packaging tests enforce that.
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        # Keep this list in lockstep with pyproject classifiers; packaging tests enforce that.
+        # A push runs 3.11 only (the version `release.yml` and the docs build use); the whole range
+        # runs on a pull request, the weekly cron and a dispatch.
+        python: ${{ github.event_name == 'push' && fromJSON('["3.11"]') || fromJSON('["3.10", "3.11", "3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -142,6 +153,9 @@ jobs:
     name: onnx export (quantization, weight-free)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Not on a push: it installs torch and onnx and exercises the exporter, which no commit on main
+    # makes more urgent than the pull request or the weekly cron that also runs it.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -173,6 +187,8 @@ jobs:
     name: evals (metric math, dataset, API guard)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Not on a push: see onnx-export above. The real-checkpoint gate is the weekly `evals.yml`.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -227,6 +243,9 @@ jobs:
     name: tests (windows)
     runs-on: windows-latest
     timeout-minutes: 20
+    # A Windows runner bills at twice the rate and the suites it runs are the same ones the Linux
+    # job runs; it belongs on the pull request and the weekly cron, not on every push to main.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -313,10 +332,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python: ["3.10", "3.11", "3.12", "3.13"]
-        include:
-          - os: windows-latest
-            python: "3.11"
+        # One cell on a push; the supported range on a pull request, the weekly cron and a dispatch.
+        python: ${{ github.event_name == 'push' && fromJSON('["3.11"]') || fromJSON('["3.10", "3.11", "3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -329,10 +346,33 @@ jobs:
       - name: Verify installed wheel and sdist without inference dependencies
         run: python sdk/python/tests/verify_package.py sdk/python/dist
 
+  python-sdk-windows:
+    name: Python SDK (windows-latest, py3.11)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    # Its own job rather than an `include:` cell of python-sdk, because an `include:` entry cannot be
+    # conditioned on the event: the Windows cell would then ride along on every push at twice the
+    # billing rate.
+    if: github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Build standalone distributions
+        run: |
+          python -m pip install --upgrade build setuptools wheel
+          python -m build --no-isolation sdk/python
+      - name: Verify installed wheel and sdist without inference dependencies
+        run: python sdk/python/tests/verify_package.py sdk/python/dist
+
   python-sdk-integration:
     name: Python SDK (live HTTP)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Not on a push: it installs torch and serve, builds the SDK and runs a server against a pinned
+    # legacy fixture. See onnx-export above for the tier rule.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -357,6 +397,9 @@ jobs:
     name: TypeScript SDK (node${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Not on a push: torch, serve and npm installs for a lane whose subject is the SDK's contract
+    # with a running server. See onnx-export above for the tier rule.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:

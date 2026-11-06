@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Weekly, and on demand: the ARM64 and Spark builds are slow image builds whose subject is the
+  # Dockerfile, not the commit. A push keeps the x86 smoke test and the HTTP test. See docs/ci.md.
+  schedule:
+    - cron: "30 5 * * 1"      # Monday 05:30 UTC, after ci.yml's full matrix (05:00)
+  workflow_dispatch:
 
 # Supersede, don't queue: a burst of pushes bills every commit's matrix when each gets its own
 # group, and on a private repository those minutes are the allowance. See ci.yml for the full note.
@@ -20,6 +25,9 @@ jobs:
     # No GPU here, so this proves installation, not inference.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    # Not on a push: an ARM64 CUDA image build at build-arg cu130 pulls gigabytes. The pull request
+    # and the weekly cron cover it.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build ARM64 CUDA 13.0 image
@@ -45,7 +53,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        # x86 on a push; both architectures on a pull request, the weekly cron and a dispatch.
+        runner: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "ubuntu-24.04-arm"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:

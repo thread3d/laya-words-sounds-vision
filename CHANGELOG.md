@@ -6,6 +6,35 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.2] - 2026-11-06
+
+**No package code changes** — the second CI release, and the one that makes a commit cheap.
+
+A push to `main` now runs one cell of each matrix instead of every cell. The lanes that need more
+than a cell moved to pull requests, `workflow_dispatch`, and a Monday cron: Windows, the Python SDK
+integration lane and the TypeScript SDK, the ONNX exporter, the evals harness, both Docker
+architectures, dependency CVEs, and three of the four CodeQL languages.
+
+| | before 4.0.1 | 4.0.1 | now |
+|---|---|---|---|
+| push to `main` | 66 | 33 | **13** |
+| tag on the same commit | +36 | +3 | **+3** |
+| pull request | 65 | 32 | 32 |
+| weekly crons | — | 41 | 65 |
+
+The weekly cron grew because the full gate has to live somewhere: `ci.yml` and `docker.yml` gained a
+Monday schedule (05:00 and 05:30 UTC) that runs the whole matrix on a fresh tree.
+
+`scripts/check_workflow_triggers.py` now prices every scenario — push, tag, pull request, weekly —
+and models the two forms that express conditional breadth: the `fromJSON` matrix expression and
+`if: github.event_name != 'push'`. It fails on anything it cannot model rather than counting it as
+one job, and it fails on a reversed pair, which would make a push cost more than before.
+
+The trade is written down in `docs/ci.md` rather than implied: a breadth job reports `skipped` on a
+push, and a push is not the full matrix — a break that only Python 3.12 sees is caught by the next
+pull request, dispatch or Monday run, not by the push that introduced it. Every suite still runs on
+3.11 on the push itself.
+
 ## [4.0.1] - 2026-11-06
 
 **No package code changes.** This release is about what runs in CI, when it runs, and what it costs —

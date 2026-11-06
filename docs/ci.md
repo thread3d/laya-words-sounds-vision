@@ -19,13 +19,24 @@ breadth has to run somewhere other than the commit path.
 
 | tier | fires on | lanes |
 |---|---|---|
-| **blocking** | every push to `main`, every pull request | `ci.yml` (the Python suites via `scripts/test_suites.py`, lint, byte-compile, packaging, the workflow-trigger audit), `docker.yml` (smoke, HTTP), `security.yml` (secret scan, dependency CVEs, CodeQL) |
+| **blocking (push)** | every push to `main` | `ci.yml` one cell per matrix — `lint`, `test` (3.11), `build`, `typescript` (node 22), `python-sdk` (ubuntu, 3.11), `feishu-benchmark`; `docker.yml` x86 smoke + HTTP; `security.yml` secret scan, unsafe-deserialization check, CodeQL (python); `docs.yml` build + deploy |
+| **breadth (pull request, weekly, dispatch)** | `pull_request`, the Monday crons, `workflow_dispatch` | the whole `ci.yml` matrix (4 Pythons, both Node versions, Windows, the SDK integration and TypeScript-SDK lanes, ONNX export, evals), both Docker runners, all four CodeQL languages, dependency CVEs |
 | **blocking (release)** | a `v*` tag | `release.yml` — the same suite list, then build, `twine check`, PyPI, GitHub Release |
-| **weekly report** | Monday 03:00 UTC (`evals.yml`), 04:00 UTC (`cpp`, `dotnet`, `go`, `java`, `rust`), 06:17 UTC (`security.yml`) | the five port lanes, the CVE re-scan, the eval baseline |
+| **weekly report** | Monday 05:00 UTC (`ci.yml`), 05:30 (`docker.yml`), 03:00 (`evals.yml`), 04:00 (`cpp`, `dotnet`, `go`, `java`, `rust`), 06:17 (`security.yml`) | the full gate on a fresh tree, the five port lanes, the CVE re-scan, the eval baseline |
 | **on demand** | `workflow_dispatch` | every lane above, plus `docs.yml`'s deploy |
 
-`docs.yml` runs its strict build on pushes to `main` and on pull requests that touch docs, `laya/`,
-or the site config; the deploy job publishes only from `main`.
+A push therefore runs the fast gate (13 jobs); a pull request, a dispatch or the Monday cron runs the
+full one (32–65). `docs.yml` runs its strict build on pushes to `main` and on pull requests that
+touch docs, `laya/`, or the site config; the deploy job publishes only from `main`.
+
+Two consequences worth knowing:
+
+- **A breadth job reports `skipped` on a push.** If branch protection "requires" one of them (say
+  `tests (windows)`), require it on pull requests rather than on `main`, or a push will wait on a
+  check that never runs.
+- **A push is not the full matrix.** A commit that breaks Python 3.12 only is caught by the next
+  pull request, dispatch, or Monday 05:00 run — not by the push that broke it. That is the trade the
+  allowance forces; `ci.yml`'s fast gate still runs every suite on 3.11.
 
 ## Why the port lanes are weekly
 
@@ -57,18 +68,24 @@ python scripts/check_workflow_triggers.py
 
 The script parses every workflow, matrix-expands it the way Actions does (the product of the
 dimensions, plus each `include:` entry that names a combination the matrix does not already
-produce), and prints the cost of a push, a tag and the weekly crons. It fails if:
+produce), and prints the cost of each scenario: a push, a tag on the same commit, a pull request, and
+the weekly crons. It fails if:
 
 - a `push:` trigger has neither a `branches:` nor a `tags:` filter, so a tag push re-runs a lane;
 - a non-release workflow fires on tags;
 - a push-triggered lane does not supersede the previous run on its ref
   (`concurrency.group` keyed on `github.ref` and `github.event_name`, `cancel-in-progress: true`);
 - a frozen port lane is back on the push or pull-request path;
-- a push, a tag, or the weekly crons exceed their budget.
+- a scenario exceeds its budget;
+- it cannot model a `strategy.matrix` or a job `if:` — an unreadable expression that silently counts
+  as one job is worse than no check, so it fails instead. The modelled forms are
+  `${{ github.event_name == 'push' && fromJSON('[…]') || fromJSON('[…]') }}` (push branch first) and
+  `if: github.event_name != 'push'`. A reversed pair is reported too, since that makes a push cost
+  *more* than it did before.
 
-Budgets today: **33 jobs** for a push to `main`, **3** more if that commit is tagged, **41** for the
-weekly crons. The script runs in the CI lint job, so a lane cannot quietly rejoin the push path;
-raise a budget in the same change that earns it.
+Budgets today: **13 jobs** for a push to `main` (**3** more if that commit is tagged), **32** for a
+pull request, **65** for the weekly crons. The script runs in the CI lint job, so a lane cannot
+quietly rejoin the push path; raise a budget in the same change that earns it.
 
 ## When the allowance runs out
 

@@ -52,6 +52,9 @@ jobs:
     name: dependency CVEs
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Not on a push: a CVE advisory set does not change between two commits on main, and this lane
+    # has its own weekly cron. The push keeps the secret scan and one CodeQL language.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -160,7 +163,7 @@ jobs:
         # both go.mod files itself and builds the onnx module with cgo (checked with the CodeQL
         # CLI 2.27.1: "Found 2 go.mod files in: laya-go/go.mod, laya-go/onnx/go.mod", and
         # onnx/session_cgo.go is in the extracted sources), so no explicit build step is needed.
-        language: [python, java-kotlin, javascript-typescript, go]
+        language: ${{ github.event_name == 'push' && fromJSON('["python"]') || fromJSON('["python", "java-kotlin", "javascript-typescript", "go"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Only the Java cell compiles anything, so only it needs a JDK -- and the wrapper jar it
@@ -195,6 +198,8 @@ jobs:
     name: no unsafe deserialization
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Stays on a push: it is cheap, and "weights load through safetensors, never pickle" is the kind
+    # of regression that should not wait for the next pull request or cron.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Weights must load through safetensors, never pickle
