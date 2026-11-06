@@ -60,6 +60,34 @@ commit that caused it. That is the deliberate trade: the blocking lanes still ca
 package immediately (`ci.yml`), and the ports answer "has the port drifted?" on a schedule that
 costs nothing on a normal day.
 
+## Record once, fan out
+
+A port lane's cells compare against goldens recorded from the Python package at the commit under
+test. Recording is the expensive half — a checkpoint fetch plus a generator run — and its result
+depends only on the commit and the pinned revision, so a matrix of N cells used to produce N
+byte-identical copies of one answer, each paying for its own torch install and its own 1.7 GB
+checkpoint fetch.
+
+`cpp.yml` now has a `goldens` job that records once and publishes two artifacts for the run:
+
+| artifact | contents | retention |
+|---|---|---|
+| `cpp-goldens` | the nine recorded families (`.cpp-goldens/*.json`) | 1 day |
+| `cpp-checkpoint-parts` | `<checkpoint>/tokenizer/` and `rl_agent_config.json` for english and multilingual — the only files a cell opens, not the weights | 1 day |
+
+The five `build` cells download both and run no Python generator at all, so they no longer install
+torch or reach the hub. They assert the shape of what arrived (`The recorded inputs arrived`), which
+turns a wrong artifact depth into an immediate failure instead of a missing-checkpoint skip after a
+full compile. The three `onnx` cells take the same recorded eight and record only the two
+graph-backed families themselves, because those are recorded from the graph *that cell* exports.
+
+Retention is one day on purpose: an artifact here is an input to this run's cells, not an archive,
+and artifact storage is billed the way minutes are.
+
+The other lanes still record per cell — `java.yml`'s cells each need their own exported graph, and
+`dotnet.yml` and `rust.yml` record through their own `regen_golden.py`. Same pattern applies, one
+lane at a time.
+
 ## What one commit costs
 
 ```bash
@@ -84,7 +112,7 @@ the weekly crons. It fails if:
   *more* than it did before.
 
 Budgets today: **13 jobs** for a push to `main` (**3** more if that commit is tagged), **32** for a
-pull request, **65** for the weekly crons. The script runs in the CI lint job, so a lane cannot
+pull request, **66** for the weekly crons. The script runs in the CI lint job, so a lane cannot
 quietly rejoin the push path; raise a budget in the same change that earns it.
 
 ## When the allowance runs out

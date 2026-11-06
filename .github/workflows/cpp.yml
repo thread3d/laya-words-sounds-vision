@@ -59,10 +59,82 @@ env:
   LAYA_REQUIRE_GOLDENS: "1"   # a missing golden is a failure, never a skip
 
 jobs:
+  # One job records what every cell compares against. Before this, each of the eight cells fetched
+  # both checkpoints (about 1.7 GB from the hub -- the fetch that gets rate limited, and the reason
+  # java.yml serialises its parity matrix) and re-ran both generators. The recorded output depends
+  # only on this commit and the pinned revision, so eight copies were eight copies of one answer.
+  # See docs/ci.md ("Record once, fan out").
+  goldens:
+    name: goldens (recorded once for every cell)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: laya-dotnet/tools/requirements-regen.txt
+
+      - name: Install the Python toolchain the goldens are recorded with
+        run: |
+          python -m pip install --upgrade pip
+          pip install "torch==2.14.0" --index-url https://download.pytorch.org/whl/cpu
+          pip install -r laya-dotnet/tools/requirements-regen.txt
+      - name: Fetch the tokenizers the goldens are recorded against
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          for c in english multilingual; do
+            python laya-java/scripts/prepare_checkpoint.py --checkpoint "$c" --no-graph
+          done
+      # --strict: a family this run could not reach is an error, not a skip marker. A skip marker
+      # written here would become every cell's expectation.
+      - name: Regenerate the goldens from Python
+        env:
+          LAYA_FIXTURE_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json --only sequences.json --only window_plan.json --only decode.json
+          python laya-go/scripts/gen_go_fixtures.py --out "$GOLDENS"
+
+      # The recorder's own floor. An empty or skipped family would otherwise reach five cells as a
+      # green comparison, which is the failure mode the `--strict` above cannot see.
+      - name: The recorded set is complete
+        run: |
+          for f in lang_tables.json lang_detect.json python_json.json tokenizer_ids.json \
+                   decode_text.json sequences.json window_plan.json decode.json go_extra.json; do
+            test -s "$GOLDENS/$f" || { echo "::error::the recorder did not write $f"; exit 1; }
+          done
+
+      # One day of retention: these are inputs to this run's cells, not an archive. Artifact storage
+      # is billed like the minutes are.
+      - name: Publish the goldens
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cpp-goldens
+          path: .cpp-goldens
+          retention-days: 1
+      # Only the parts a cell opens: `Tokenizer::LoadDir` reads `<checkpoint>/tokenizer/`, and
+      # `agent_test` reads `<checkpoint>/rl_agent_config.json`. The weights are not in that list,
+      # and the cells that need them (the ONNX lane) fetch their own.
+      - name: Publish the checkpoint parts the tests load
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cpp-checkpoint-parts
+          path: |
+            laya-java/.work/checkpoints/english/rl_agent_config.json
+            laya-java/.work/checkpoints/english/tokenizer
+            laya-java/.work/checkpoints/multilingual/rl_agent_config.json
+            laya-java/.work/checkpoints/multilingual/tokenizer
+          retention-days: 1
+
   build:
     name: build (${{ matrix.compiler }}, ${{ matrix.preset }})
     runs-on: ubuntu-latest
-    needs: security           # the GoogleTest pin is verified before it is fetched and built
+    # The GoogleTest pin is verified before it is fetched and built, and the goldens are recorded
+    # once for all five cells rather than once per cell.
+    needs: [security, goldens]
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 45
     strategy:
@@ -76,11 +148,10 @@ jobs:
             preset: tsan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Python is only used for the two checker scripts now, so there is no pip cache to restore.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: laya-dotnet/tools/requirements-regen.txt
 
       - name: Checker tests
         run: python laya-cpp/scripts/test_check_test_xml.py
@@ -89,26 +160,35 @@ jobs:
       - name: Install a comma-decimal locale
         run: sudo locale-gen de_DE.UTF-8
 
-      # Goldens are recorded from the Python reference at this commit, never read from a committed copy.
-      - name: Install the Python toolchain the goldens are recorded with
+      # The goldens and the checkpoint parts come from the `goldens` job: recording them here was
+      # five identical copies of the same answer, each paying for a torch install and a 1.7 GB
+      # checkpoint fetch. No pip install in this job any more -- nothing here runs the generator.
+      - name: Take the recorded goldens
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cpp-goldens
+          path: .cpp-goldens
+      - name: Take the checkpoint parts the tokenizer tests load
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cpp-checkpoint-parts
+          path: laya-java/.work/checkpoints
+      # Assert the shape the cells depend on. An artifact that restored to the wrong depth would
+      # otherwise reach the tests as "no checkpoint" -- which LAYA_REQUIRE_GOLDENS makes a failure
+      # anyway, but only after a full compile.
+      - name: The recorded inputs arrived
         run: |
-          python -m pip install --upgrade pip
-          pip install "torch==2.14.0" --index-url https://download.pytorch.org/whl/cpu
-          pip install -r laya-dotnet/tools/requirements-regen.txt
-      - name: Fetch the tokenizers the goldens are recorded against
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          for c in english multilingual; do
-            python laya-java/scripts/prepare_checkpoint.py --checkpoint "$c" --no-graph
+          for f in lang_tables.json lang_detect.json python_json.json tokenizer_ids.json \
+                   decode_text.json sequences.json window_plan.json decode.json go_extra.json; do
+            test -s "$GOLDENS/$f" || { echo "::error::the goldens artifact is missing $f"; exit 1; }
           done
-      - name: Regenerate the goldens from Python
-        env:
-          LAYA_FIXTURE_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json --only sequences.json --only window_plan.json --only decode.json
-          python laya-go/scripts/gen_go_fixtures.py --out "$GOLDENS"
+          for c in english multilingual; do
+            test -s "$LAYA_CHECKPOINTS/$c/tokenizer/tokenizer.json" \
+              || { echo "::error::the checkpoint artifact is missing $c/tokenizer/tokenizer.json"; exit 1; }
+            test -s "$LAYA_CHECKPOINTS/$c/rl_agent_config.json" \
+              || { echo "::error::the checkpoint artifact is missing $c/rl_agent_config.json"; exit 1; }
+          done
+
       - name: Compiled C++ tables match CPython
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -139,7 +219,9 @@ jobs:
   onnx:
     name: onnx (${{ matrix.compiler }}, ${{ matrix.preset }})
     runs-on: ubuntu-latest
-    needs: security
+    # The shared goldens come from the recorder; only the two graph-backed families are recorded
+    # here, because they need the graph this cell exports.
+    needs: [security, goldens]
     continue-on-error: true   # advisory: see the header
     timeout-minutes: 90
     strategy:
@@ -203,13 +285,20 @@ jobs:
             done
           done
 
-      - name: Regenerate the goldens from Python
+      # The eight shared families arrive recorded; the two graph-backed ones cannot, because they
+      # are recorded from the graph this cell exports. Recording the shared ones here was three
+      # more copies of the same answer.
+      - name: Take the recorded goldens
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cpp-goldens
+          path: .cpp-goldens
+      - name: Record the two graph-backed families, from this cell's graphs
         env:
           LAYA_FIXTURE_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json --only sequences.json --only window_plan.json --only decode.json
-          python laya-go/scripts/gen_go_fixtures.py --out "$GOLDENS"
+          test -s "$GOLDENS/lang_tables.json" || { echo "::error::the goldens artifact is empty"; exit 1; }
           # predict.json is recorded per checkpoint from that checkpoint's own graph.
           for c in multilingual english; do
             LAYA_ONNX_GRAPH="$ONNX_ROOT/$c/laya.onnx" LAYA_PREDICT_MODEL="$c" \

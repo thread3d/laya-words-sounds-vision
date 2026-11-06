@@ -6,6 +6,28 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.3] - 2026-11-06
+
+**No package code changes.** The C++ lane now records its goldens once instead of eight times.
+
+`cpp.yml` grew a `goldens` job. It fetches the two checkpoints, records the eight shared families and
+the Go-only family, and publishes them for the run as a one-day artifact — together with the only
+parts of a checkpoint a cell actually opens (`<checkpoint>/tokenizer/` and `rl_agent_config.json`,
+not the 846 MB of weights). The five `build` cells download both artifacts and no longer install
+torch, reach the hub, or run a generator; they assert the shape of what arrived, so a wrong artifact
+depth fails immediately instead of arriving as a missing-checkpoint skip after a full compile. The
+three `onnx` cells take the recorded eight and record only the two graph-backed families, which are
+recorded from the graph *that cell* exports and therefore cannot be shared.
+
+Per weekly run that removes seven torch installs, fourteen checkpoint downloads (about 1.7 GB each —
+the fetch that gets rate limited) and thirteen generator runs.
+
+Verified locally on this machine, with the same pinned checkpoints: the recorder's exact command
+regenerates 14 of the 20 families byte-identically to the committed fixtures, the three graph-backed
+ones as skip markers as expected, and the remaining three differ only through this interpreter
+(`Python 3.13`: `unicode_version` 15.1.0 where the committed fixture records 15.0.0, and a changed
+`repr_digest`). The record step runs on the same 3.12 the cells used, which is why it is pinned.
+
 ## [4.0.2] - 2026-11-06
 
 **No package code changes** — the second CI release, and the one that makes a commit cheap.
