@@ -138,9 +138,9 @@ the only comparison that isolates what the decision head adds.
 `run_engine_arms.sh` trains two Laya checkpoints through `laya-train --audio` on the same rows and
 scores each with `eval_gate.py`:
 
-* `esc10-sc` — 10 options, `state_conditioned` (one row per option), 320 clips per epoch, both
-  gates: it is the arm where option-order invariance can be measured cheaply, and the layout the
-  [vision work](vision-benchmark-results.md) found passes both gates.
+* `esc10-sc` — 10 options, `state_conditioned` (one row per option), both gates: it is the arm where
+  option-order invariance can be measured, and the layout the [vision work](vision-benchmark-results.md)
+  found passes both gates.
 * `esc50-seq` — 50 options, the joint head, 1 600 clips per epoch: the arm with more data, scored on
   accuracy and gate 1.
 
@@ -198,13 +198,39 @@ FSDD gives 2 000 training recordings rather than 288, and the same recipe as the
 | 3 epochs, `--grad-accum 1 --head-lr 1e-3` | 0.1490 | 750 |
 | **15 epochs, `--grad-accum 1`, default `head_lr`** | **0.7550** | 3 750 |
 
-A `state_conditioned` arm on the same public data was attempted and **cost too much for a CPU**:
-601 items × 10 rows = 6 010 rows per epoch, and measured **~11 minutes per epoch** — about 2.2 hours
-for the 12-epoch run the recipe wants. The reason is worth knowing rather than treating as bad luck:
-with the encoder frozen, a *text* step skips the backward pass, but a media step cannot — the
-projector sits upstream of the encoder, so its gradient has to traverse all 28 frozen layers. A
-profile without the encoder attached measured 2.4 minutes per epoch; in the real run it is 11. That
-is the price of the projector, and it is why every media arm here is quoted with its wall clock.
+A `state_conditioned` arm on the same public data cost too much for a CPU (601 items × 10 rows =
+6 010 rows per epoch, **~11 minutes per epoch**, because a media step cannot skip the backward pass
+through a frozen encoder: the projector sits upstream of it). On one GPU it is affordable, and it is
+the arm §4.2 reports.
+
+### 4.2 The GPU arms: the shipping layout, and a tower that changes the answer
+
+Three arms were re-run on this machine's AMD cards (see the harness README for the MIOpen conv
+workaround they need). All on FSDD, 1 000 speaker-disjoint held-out clips, frozen encoder:
+
+| arm | accuracy | gate 1 (recording removed) | gate 2b (options reordered) | median latency |
+|---|---|---|---|---|
+| `wav2vec2-base`, joint layout, 15 epochs | 0.7550 | +0.655 pass | **27.4 %** fail | 69 ms (CPU) |
+| `wav2vec2-base`, **`state_conditioned`**, 15 epochs | 0.6960 | +0.596 pass | **0.0 %** pass | 96 ms (GPU) |
+| **`wav2vec2-large`, joint layout, 15 epochs** | **0.9740** | **+0.874** pass | 9.6 % fail | **31 ms** (GPU) |
+| linear probe on the same frozen features (base / large) | 0.7950 / 0.9750 | — | — | closed form |
+
+Four things fall out, and the last one is the reason to run benchmarks rather than argue:
+
+1. **The shipping layout passes both gates on public data**: 0.6960 with the recording removed
+   dropping it to chance (+0.596) and **zero** option-order flips. It pays for that in accuracy
+   against the joint layout on the same data (0.6960 against 0.7550), which is the vision program's
+   trade in miniature.
+2. **The tower changes the answer by 22 points.** The same recipe on `wav2vec2-large` reaches
+   **0.9740** — within **0.1 points of the closed-form probe** on the same features (0.9750), and 22
+   points above the base-tower arm. The decision head is not the limiter here; the representation is.
+3. **A better tower reduces the joint layout's order dependence but does not remove it**: 27.4 % of
+   answers flip under a permutation with the base tower, 9.6 % with the large one, still above the
+   2 % gate. Position-dependence is a property of scoring options against each other, and only the
+   layout fixes it.
+4. **50-way on 1 440 training items is still a small-data problem for the head.** The GPU arm at 20
+   epochs reaches **0.1200** against a 0.5265 probe; the head needs more examples than a 50-way
+   benchmark with 1 440 rows gives it, which is exactly what the FSDD arms show from the other side.
 
 So the head is slow, not unable: 3 750 updates take it from chance to **75.5 %**, within 4 points of the
 linear probe on the same frozen features. That is the engine's first real public number.

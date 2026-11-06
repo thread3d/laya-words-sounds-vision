@@ -6,6 +6,31 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.1.1] - 2026-11-05
+
+The arms the CPU could not afford, measured on the cards — and the best number this project has.
+
+### Measured (FSDD, 1 000 speaker-disjoint held-out clips, frozen encoder)
+
+| arm | accuracy | gate 1 | gate 2b | median latency |
+|---|---|---|---|---|
+| `wav2vec2-base`, joint layout, 15 epochs | 0.7550 | +0.655 pass | 27.4 % fail | 69 ms (CPU) |
+| `wav2vec2-base`, `state_conditioned`, 15 epochs | 0.6960 | +0.596 pass | **0.0 %** pass | 96 ms (GPU) |
+| **`wav2vec2-large`, joint layout, 15 epochs** | **0.9740** | **+0.874** pass | 9.6 % fail | **31 ms** (GPU) |
+| linear probe on the same features | 0.7950 / 0.9750 | — | — | closed form |
+
+- **The shipping `state_conditioned` layout now has a public-data result**, and it passes both gates:
+  0.6960, gate 1 +0.596, **0.0 %** flips — paying 6 points of accuracy against the joint layout for
+  the invariance, which is the vision program's trade in miniature.
+- **`wav2vec2-large` puts the engine within 0.1 points of the closed-form probe** (0.9740 against
+  0.9750) and 22 points above the same recipe on the base tower: with a good representation the
+  decision head is not the limiter.
+- **A better tower reduces the joint layout's order dependence but does not remove it** — 27.4 % →
+  9.6 % flips, still above the 2 % gate. Position-dependence belongs to scoring options against each
+  other; only the layout fixes it.
+- **50-way ESC-50 on 1 440 training items remains a small-data problem for the head**: 0.1200 at 20
+  epochs on a GPU against a 0.5265 probe. Reported as it is.
+
 ## [3.1.0] - 2026-11-05
 
 The audio benchmark harness runs on this machine's GPUs — 3x AMD gfx1030, 34 GB each — and the

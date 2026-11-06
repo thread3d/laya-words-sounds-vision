@@ -135,12 +135,16 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 
 The sound path is **measured**, not asserted. On public data, through the shipped path:
 
-* **0.7550** on 1 000 speaker-disjoint held-out recordings of [FSDD](https://github.com/Jakobovski/free-spoken-digit-dataset),
-  with an audio-removal gain of **+0.655** — take the recording away and the answer falls to chance,
-  so the decision is about the sound and not the text around it. **69 ms** median CPU latency per decision.
-* **The layout that ships passes both gates.** `state_conditioned` scores 1.0000 with a **+0.906** gain
-  and **0.0 %** option-order flips on a learning control; the joint layout's **27.4 %** flip rate on
-  real data reproduces, on audio, the defect the vision program found and fixed.
+* **0.9740** on 1 000 speaker-disjoint held-out recordings of
+  [FSDD](https://github.com/Jakobovski/free-spoken-digit-dataset) with a `wav2vec2-large` tower — 22
+  points above the same recipe on the base tower, 0.1 points from the closed-form probe on the same
+  features, with an audio-removal gain of **+0.874** (take the recording away and the answer falls to
+  chance). **31 ms** median latency per decision on one GPU.
+* **The layout that ships passes both gates on public data.** `state_conditioned` scores 0.6960 with a
+  **+0.596** gain and **0.0 %** option-order flips on FSDD, against **27.4 %** flips for the joint
+  layout on the same rows — on audio, the defect the vision program found and fixed. A better tower
+  cuts the joint layout's flips to 9.6 % but does not remove them: that is the layout's property, not
+  the tower's.
 * **A frozen tower is a choice worth making deliberately.** Same features, same closed-form head:
   `wav2vec2-base` 0.5265 on ESC-50 and 0.7950 on FSDD, its ASR sibling 0.3805, `wav2vec2-large`
   **0.6280** and **0.9750**. Self-supervised for environmental sound, ASR for speech content.
