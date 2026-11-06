@@ -6,6 +6,48 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.16] - 2026-11-06
+
+**No package code changes.** The three open Dependabot updates, taken together — and the one that
+runs code was actually run.
+
+**`actions/setup-dotnet` 6.0.0 → 6.1.0** — `dotnet.yml`, all four references (the `goldens` job and
+each parity cell's primary/retry pair). The pin (`0f4a354d`) was resolved through the GitHub API and
+equals the commit `v6.1.0` points at; the method was validated by reproducing the pin already in the
+tree from `v6.0.0`. The action's input surface only grew (`check-latest`, `skip-lts-prepass`, a
+fallback install directory), so `global-json-file` — the only input this workflow passes — is
+unchanged, and the release also carries a dependency security fix.
+
+**`github/codeql-action` 4.39.1 → 4.39.2** — `security.yml`, `init`, `autobuild` and `analyze`. All
+three move to one commit (`1fc58d04`), which is exactly what `dependabot.yml`'s group exists to
+guarantee: CodeQL refuses to run when the steps disagree on version. The release is a CodeQL bundle
+update plus deprecation warnings, and it schedules nothing new here — `security.yml` does not set
+`CODEQL_ACTION_CLEANUP_TRAP_CACHES`, the feature 4.39.2 removes.
+
+**`vitest` 5.0.5 → 5.1.0** — `laya-ts`, `package.json` and lockfile. This is the only one of the three
+that executes code, so it was executed: `npm ci` accepts the lockfile (71 packages, 0
+vulnerabilities), and `npm test` — `tsc --noEmit` over the type tests, then the suite — reports **48
+files, 1418 tests passed** on 5.1.0, the same totals measured on 5.0.5 before the change. Both runs
+need a writable `HOME`: three `revision-pinning` tests `mkdir ~/.cache/laya-ts`, which cannot succeed
+where `$HOME` is read-only, so the numbers quoted are from runs with `HOME` pointed at a scratch
+directory, not a single green run that would have hidden that.
+
+Actions are disabled on this repository, so none of the three ran on a runner. For the two action
+bumps the SHA-equals-tag check above is the property a runner would otherwise establish.
+
+**Also fixed — the env-docs guard could not see a repository variable.** `tests/test_env_docs.py`
+asks, in its second direction, that every documented `LAYA_*` be consumed somewhere in the tree. It
+sweeps with `.github` excluded, which is deliberate: a workflow file is mostly shell and prose, so
+counting every occurrence would let a mention in a comment stand in for a consumer. `4.0.10` moved
+the Pages deploy to `vars.LAYA_PAGES` and documented it in `docs/ci.md`, which put a real consumer
+outside that sweep — so the guard read the variable as documented and wired to nothing and failed,
+on `main` as well as here. `repository_variable_names()` now collects `vars.LAYA_*` reads out of
+`.github/workflows/` and merges them into the consumer map; only the `vars.` form is matched, since
+that is Actions reading the string rather than prose mentioning it. Verified by disabling the new
+matcher, which restores the failure word for word. This was found while verifying the bumps above
+and would have failed `ci.yml` and `release.yml`'s publish gate the moment Actions ran.
+
+
 ## [4.0.15] - 2026-11-06
 
 **No package code changes.** Dependabot stops proposing a numpy major update it should not propose.
