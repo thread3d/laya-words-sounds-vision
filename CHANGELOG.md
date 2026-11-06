@@ -6,6 +6,75 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.0] - 2026-11-06
+
+The sound path, **verified on the hardware it will run on**. 3.0 shipped the modality and 3.1 took it
+to this machine's three GPUs: every benchmark arm that a CPU made too expensive has now been run, the
+shipping layout has a public-data result, and the comparator systems are measured locally instead of
+quoted.
+
+**What the major number marks.** The Python API remains additive — no call site changes and no
+checkpoint needs rebuilding. Two things a caller can observe:
+
+* **`audio_info` reports `audio_format`**, a container's format code, and a plain PCM WAV therefore
+  decodes with the standard library instead of requiring `soundfile`. Code that compares the whole
+  `audio_info` dict against a literal will see the extra key; code that decoded a 16-bit WAV without
+  the `audio` extra used to fail and now works.
+* **A GPU run of a sound checkpoint needs the harness's conv workaround on a ROCm build whose MIOpen
+  segfaults on convolution** (this machine's does). The package does not carry it — the defect is the
+  installed MIOpen, not Laya — and [Upgrading](docs/upgrading.md) says what to do about it.
+
+### Measured on the GPUs (3x AMD gfx1030, 34 GB each)
+
+| arm (FSDD, 1 000 speaker-disjoint held out) | accuracy | gate 1 | gate 2b | latency |
+|---|---|---|---|---|
+| base tower, joint layout | 0.7550 | +0.655 pass | 27.4 % fail | 69 ms (CPU) |
+| base tower, **`state_conditioned`** | 0.6960 | +0.596 pass | **0.0 %** pass | 96 ms |
+| **large tower, joint layout** | **0.9740** | **+0.874** pass | 9.6 % fail | **31 ms** |
+| probe on the same frozen features | 0.7950 / 0.9750 | — | — | closed form |
+
+- **The shipping layout has a public-data result and passes both gates.**
+- **The large tower puts the engine within 0.1 points of the closed-form probe** and 22 points above
+  the same recipe on the base tower: the decision head is not the limiter, the representation is.
+- **A better tower lowers the joint layout's order dependence but does not remove it** (27.4 % →
+  9.6 % flips): that is the layout's property, and only the layout fixes it.
+- **CLAP zero-shot scores 0.8955** on all 2 000 ESC-50 clips, measured here, against the engine's
+  0.1200 at 50-way with 1 440 rows — a representation gap, not a head or layout gap.
+- **50-way ESC-50 remains a small-data problem for the head**: 0.1200 at 20 GPU epochs against a
+  0.5265 probe.
+
+### Added
+
+- `research/benchmarks/audio_esc50/gpuenv.sh`, `gpu_patch.py`, `train_gpu.py`, `run_gpu_arms.sh`:
+  the ROCm environment, the MIOpen conv workaround (unfold + `bmm`, verified layer by layer against
+  `conv` on the model's own weights), a `laya-train` entry point that installs it, and both arms one
+  per card.
+- `--device` on `probe.py` and `eval_gate.py`, with GPU extraction batched **by exact sample count**.
+- `zeroshot_clap.py` (the CLAP comparator) and `cv_esc10.py` (the five-fold protocol at engine scale,
+  ~2 h on one card).
+- `gpu_patch.patch_model`: the workaround extended to `Conv2d` and to any model.
+
+### Fixed
+
+- **A PCM WAV no longer needs `soundfile`.** `_wav_info` parsed the container's format code and then
+  dropped it, so the check that selects the standard-library decoder could never be true and every
+  WAV took the optional-decoder path — the opposite of the documented contract, unnoticed because the
+  CPU test environment has the extra installed.
+- The zero-shot script compared a predicted index with a class name and reported 0.0000, which read
+  as "the model learned nothing" rather than as a bug.
+- `--checkpoint-every`: a media checkpoint is ~1.2 GB and the per-epoch recovery write cost more than
+  the epoch it protected (~6 min against 2.4 min).
+- `--encode-workers`: media dataset builds were serial, 9.2 inputs/s against 18.9 with eight threads.
+
+### Notes
+
+- Wall clocks are quoted with every number because they decide what is affordable: a media training
+  step cannot skip the backward pass through a frozen encoder (the projector is upstream of it), and
+  a 50-option head is memory-bandwidth bound, so batching doubles short rows and does nothing for long
+  ones.
+- Still open, and GPU-bound: five-fold engine arms (`cv_esc10.py` is the tool), an AST/BEATs fine-tune
+  measured here, and `audio.input: "mel"` for spectrogram-style towers.
+
 ## [3.1.3] - 2026-11-05
 
 ### Added

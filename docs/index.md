@@ -22,8 +22,8 @@ Install Laya and make a first decision with the README's
 [Quickstart](https://github.com/thread3d/laya-words-sounds-vision#quickstart). They stay in the README so there
 is one copy to keep current.
 
-3.0 is the measured release: the sound path's first public numbers, both media gates, and the
-frozen-tower ladder are in [the audio results](audio-benchmark-results.md). If you are upgrading,
+4.0 is the measured release: the sound path's public numbers, both media gates, the frozen-tower
+ladder and a locally measured CLAP comparator are in [the audio results](audio-benchmark-results.md). If you are upgrading,
 [Upgrading](upgrading.md) answers "do I have to change anything?" per release; the release history is
 in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
 

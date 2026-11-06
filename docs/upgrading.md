@@ -5,6 +5,21 @@ first and the older sections stay, because a user can be arriving from any versi
 including the 2.1 tags this page does not repeat line by line, is in
 [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
 
+## 4.0 — verified on the hardware
+
+**Nothing to change**, with two observations:
+
+* **`audio_info` now reports `audio_format`**, and a plain PCM WAV therefore decodes with the standard
+  library rather than through `soundfile`. If you compare the whole dict against a literal, add the
+  key; if you were decoding a 16-bit WAV without the `audio` extra, it works now.
+* **A GPU run of a sound checkpoint needs a conv workaround on a ROCm build whose MIOpen segfaults on
+  convolution.** This machine's does, and the harness's `gpu_patch.py` routes the tower's `Conv1d`
+  layers through unfold + matmul (verified against `conv1d` on the real weights). The package does not
+  carry it: the defect is the installed MIOpen, not Laya. On a build where convolution works — most
+  CUDA and ROCm installs — nothing is needed.
+
+The measurements this release rests on are in [the audio results](audio-benchmark-results.md).
+
 ## 3.0 — the measured release
 
 **Nothing to change.** 2.0 added the sound modality and 2.1 measured it on public data (ESC-50, ESC-10

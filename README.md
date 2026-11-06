@@ -131,6 +131,33 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 
 **[The documentation](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs)**: guides for [prediction hooks](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/hooks/index.md), [schema-driven decisions](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/structured.md), [Docker](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/docker.md) and [LangChain and LangGraph](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/langchain.md), plus a full [API reference](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/reference/index.md) and [Upgrading](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/upgrading.md). `zensical build --strict` renders the same pages from `docs/`. Release history is in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md).
 
+## What's new in 4.0.0
+
+The sound path, verified on the hardware it runs on. Every benchmark arm a CPU made too expensive
+has now been run on this machine's three GPUs, and the comparators are measured here rather than
+quoted.
+
+* **0.9740** on 1 000 speaker-disjoint held-out recordings of
+  [FSDD](https://github.com/Jakobovski/free-spoken-digit-dataset) with a `wav2vec2-large` tower — 22
+  points above the same recipe on the base tower, **0.1 points from the closed-form probe** on the
+  same frozen features, with an audio-removal gain of **+0.874**. **31 ms** per decision on one GPU.
+* **The shipping `state_conditioned` layout passes both gates on public data**: 0.6960 with a
+  **+0.596** audio-removal gain and **0.0 %** option-order flips, against **27.4 %** flips for the
+  joint layout on the same rows. A better tower lowers that to 9.6 % and cannot remove what the
+  layout is doing.
+* **CLAP zero-shot scores 0.8955** on the same 50 ESC-50 classes with no training at all; the engine's
+  50-way arm, with 1 440 rows, reaches 0.1200. The gap is the representation — the same engine reaches
+  0.9740 where the tower's pre-training matches the task.
+
+The harness — including the ROCm environment and the MIOpen conv workaround this build needs — is in
+[`research/benchmarks/audio_esc50/`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/research/benchmarks/audio_esc50),
+and the numbers, controls and caveats are in
+[the audio results](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/audio-benchmark-results.md).
+See [Upgrading](https://github.com/thread3d/laya-words-sounds-vision/blob/main/docs/upgrading.md) for
+the two things a caller can observe, and
+[CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main/CHANGELOG.md) for the
+full entry.
+
 ## What's new in 3.0.0
 
 The sound path is **measured**, not asserted. On public data, through the shipped path:
