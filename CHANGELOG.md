@@ -6,6 +6,33 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.8] - 2026-11-06
+
+**No package code changes.** Item 4: a release has to be a release, and nothing else has to look like
+one.
+
+A tag does two things here — `vX.Y.Z` starts `release.yml`, which publishes to PyPI and opens a
+GitHub Release, and any other tag is a marker on a commit — and the rules keeping those apart were
+three inline shell snippets in three workflows, each checking one property. None of them checked that
+the changelog says what the version says, which is how a hand edit that replaced a `## [x.y.z]`
+heading instead of adding above it went unnoticed twice while these notes were being written.
+
+`scripts/check_release.py` is now the single check, over the three facts a release is:
+
+* **one version** — `pyproject.toml`, `laya.__version__` and `nix/package.nix` agree;
+* **a readable section** — the newest `## [x.y.z] - YYYY-MM-DD` section is that version and has a
+  body, and a *missing* section is reported as what it usually is: a heading replaced rather than
+  added;
+* **a matching tag** — `vX.Y.Z` names the version, because `v*` is what publishes.
+
+It also refuses a tag like `v4.0`: it begins with `v`, so it starts the publish workflow, and it is
+not a release. Savepoints stay `ci-<date>-<topic>`.
+
+CI runs the tree half on every push and the tag half on a tag; `release.yml` runs it before installing
+anything, so a mis-tagged release fails in seconds instead of after a ten-minute suite run and a
+build. `tests/test_release_discipline.py` exercises every failure path against synthetic trees,
+including the truncated-heading shape.
+
 ## [4.0.7] - 2026-11-06
 
 **No package code changes.** Item 3: the port lanes can run on a machine you own, and nothing moves

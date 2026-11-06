@@ -101,6 +101,14 @@ What has to be green, what reports weekly, and what a commit costs is
   an older commit on the same ref, rejoins the push path as a frozen port, or pushes a budget over
   its limit. The CI lint job runs it; run it locally before pushing a workflow change.
 
+## Releasing
+
+`docs/ci.md` has the rules; the short version is that a release is one version across `pyproject.toml`,
+`laya.__version__` and `nix/package.nix`, a `CHANGELOG.md` section for it with a body, and a `vX.Y.Z`
+tag that names it. `python scripts/check_release.py --tag vX.Y.Z` checks all three, and CI runs the
+tree half on every push. A tag that marks a commit without publishing must not begin with `v` — use
+`ci-<date>-<topic>`.
+
 ## Documentation
 
 The documentation in [`docs/`](https://github.com/thread3d/laya-words-sounds-vision/tree/main/docs) builds

@@ -324,6 +324,11 @@ jobs:
         # against the tree the branch push had just built. The check reads the YAML, matrix-expands
         # it, and fails if a tag push costs more than the release jobs it is meant to cost.
         run: python scripts/check_workflow_triggers.py
+      # Every push: the tree has one version, and the changelog says what that version is. The
+      # broken shape this catches is a hand edit that replaced a `## [x.y.z]` heading instead of
+      # adding above it -- the prose then reads as part of the older release, and nothing noticed.
+      - name: The tree is releasable
+        run: python scripts/check_release.py
       - name: Byte-compile every module
         run: python -m compileall -q laya/ tests/ verify/ examples/ sdk/python/
 
@@ -447,12 +452,11 @@ jobs:
       - run: python -m build
       - name: Validate metadata
         run: python -m twine check dist/*
-      - name: Version must match the tag on a release
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          pkg=$(python -c "import re;print(re.search(r'version = \"(.*)\"', open('pyproject.toml').read()).group(1))")
-          tag="${GITHUB_REF_NAME#v}"
-          test "$pkg" = "$tag" || { echo "pyproject $pkg != tag $tag"; exit 1; }
+      # On a tag, the version, the changelog section and the tag have to agree. One script, shared
+      # with release.yml, instead of two inline copies of the version half.
+      - name: Version, changelog and tag must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python scripts/check_release.py --tag "$GITHUB_REF_NAME"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist

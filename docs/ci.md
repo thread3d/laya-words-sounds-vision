@@ -154,9 +154,36 @@ lanes read one repository variable, and a machine you already own spends no minu
 repository public, which grants free hosted minutes and is a visibility decision rather than a CI
 one.
 
-## Release tags
+## Releasing
 
-`release.yml` fires on any `v*` tag and requires `pyproject.toml`'s version to equal the tag before
-it publishes. A savepoint that is not a release therefore must not use the `v*` shape — this
-repository uses `ci-<date>-<topic>` for those (see `git tag -l 'ci-*'`), so a commit can be marked
-without starting a publish.
+A release is three facts that have to agree:
+
+| fact | where |
+|---|---|
+| one version | `pyproject.toml`, `laya.__version__` and `nix/package.nix` declare the same `x.y.z` |
+| a readable section | `CHANGELOG.md`'s newest `## [x.y.z] - YYYY-MM-DD` is that version and has a body |
+| a matching tag | `vX.Y.Z` names that version, because `release.yml` publishes on `v*` |
+
+`scripts/check_release.py` is the single check for all three. CI runs the tree half on every push
+(the `lint` job) and the tag half on a tag (the `package` job), and `release.yml` runs it before it
+installs anything — a tag naming the wrong version fails in seconds rather than after the suite run
+and a build.
+
+```bash
+# bump the three files and add the changelog section, then:
+python scripts/check_release.py --tag v4.0.8
+git tag -a v4.0.8 -m "4.0.8: ..." && git push origin main v4.0.8
+```
+
+The tree half exists because of a hand-edit that happened twice here: replacing a `## [x.y.z]`
+heading instead of adding above it, which leaves the new prose attached to the release beneath it and
+nothing noticing. The checker names that shape when it sees it.
+
+**Savepoint tags are not releases.** A tag that marks a commit without publishing anything must not
+begin with `v`, because `v*` is the pattern that starts the publish; this repository uses
+`ci-<date>-<topic>` for those (`git tag -l 'ci-*'`). The checker refuses a tag like `v4.0` for exactly
+that reason: it looks like a release to `release.yml` and is not one.
+
+After the tag, `release.yml` runs the shared suite list, then `python -m build` and `twine check`,
+publishes to PyPI with a trusted publisher (no token lives in the repository), and writes the GitHub
+Release.
