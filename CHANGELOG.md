@@ -6,6 +6,32 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.11] - 2026-11-06
+
+**No package code changes.** Item 7, part two: the three pieces of hygiene it named.
+
+**Four Dependabot alerts closed.** All four were `rustls` in `laya-rust/Cargo.lock` (one moderate, three
+low — session `Debug` formatting exposing TLS master secrets, ECH rejection exposing buffered
+application data, an unauthenticated ServerHello poisoning the per-name cache, and brotli certificate
+decompression allocating without bound), all fixed upstream in 0.23.46. The lock moves 0.23.45 →
+0.23.46 through `ureq`, which is the opt-in artifact download path; `cargo check --locked` compiles
+against it.
+
+**`actionlint` is now in the blocking gate.** The workflows decide what runs on this repository's
+behalf, and a malformed expression or a shellcheck finding in a `run:` block failed nothing. The `lint`
+job downloads `actionlint` 1.7.7, verifies its SHA-256 before extracting, and runs it over all fourteen
+workflows. The checksum is the one in that release's `checksums.txt` and was separately re-derived from
+the archive, so the two agree. Demonstrated both ways: a deliberately broken workflow
+(`timeout-minutes: thirty`) exits non-zero and passes again once repaired, and a tampered expected
+checksum fails before the binary runs.
+
+**The trusted-publisher instructions named a repository that no longer exists.** `release.yml` told an
+operator to register the PyPI publisher for `owner NandhaKishorM, repo laya` — the pre-move identity.
+The publish step would have failed the OIDC exchange against a publisher registered for someone else's
+repository, with a message about tokens rather than about a stale comment. It now names
+`thread3d/laya-words-sounds-vision`, and says to check that line first if publishing ever fails.
+
+
 ## [4.0.10] - 2026-11-06
 
 **No package code changes.** Item 7, part one: two defects that were silent, and are now loud.

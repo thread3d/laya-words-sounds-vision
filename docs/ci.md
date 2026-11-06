@@ -19,7 +19,7 @@ breadth has to run somewhere other than the commit path.
 
 | tier | fires on | lanes |
 |---|---|---|
-| **blocking (push)** | every push to `main` | `ci.yml` one cell per matrix — `lint`, `test` (3.11), `build`, `typescript` (node 22), `python-sdk` (ubuntu, 3.11), `feishu-benchmark`; `docker.yml` x86 smoke + HTTP; `security.yml` secret scan, unsafe-deserialization check, CodeQL (python); `docs.yml` strict build (deploy only where `vars.LAYA_PAGES` is set) |
+| **blocking (push)** | every push to `main` | `ci.yml` one cell per matrix — `lint` (ruff, `actionlint`, the workflow-trigger audit, the release check, byte-compile), `test` (3.11), `build`, `typescript` (node 22), `python-sdk` (ubuntu, 3.11), `feishu-benchmark`; `docker.yml` x86 smoke + HTTP; `security.yml` secret scan, unsafe-deserialization check, CodeQL (python); `docs.yml` strict build (deploy only where `vars.LAYA_PAGES` is set) |
 | **breadth (pull request, weekly, dispatch)** | `pull_request`, the Monday crons, `workflow_dispatch` | the whole `ci.yml` matrix (4 Pythons, both Node versions, Windows, the SDK integration and TypeScript-SDK lanes, ONNX export, evals), both Docker runners, all four CodeQL languages, dependency CVEs |
 | **blocking (release)** | a `v*` tag | `release.yml` — the same suite list, then build, `twine check`, PyPI, GitHub Release |
 | **weekly report** | Monday 05:00 UTC (`ci.yml`), 05:30 (`docker.yml`), 03:00 (`evals.yml`), 04:00 (`cpp`, `dotnet`, `go`, `java`, `rust`), 06:17 (`security.yml`) | the full gate on a fresh tree, the five port lanes, the CVE re-scan, the eval baseline |
@@ -187,6 +187,11 @@ git tag -a v4.0.8 -m "4.0.8: ..." && git push origin main v4.0.8
 The tree half exists because of a hand-edit that happened twice here: replacing a `## [x.y.z]`
 heading instead of adding above it, which leaves the new prose attached to the release beneath it and
 nothing noticing. The checker names that shape when it sees it.
+
+**The workflows are linted too.** `lint` downloads `actionlint` at a pinned version, verifies its
+SHA-256 before extracting it, and runs it over all fourteen workflows — a bad expression or a
+shellcheck finding in a `run:` block is a failure like any other. Like the runner bootstrap, the pin
+is a version plus the checksum published with that release.
 
 **Savepoint tags are not releases.** A tag that marks a commit without publishing anything must not
 begin with `v`, because `v*` is the pattern that starts the publish; this repository uses

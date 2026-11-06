@@ -4,8 +4,14 @@ name: Release
 # publishes to PyPI and opens a GitHub Release.
 #
 # Set up once: PyPI -> Publishing -> add a Trusted Publisher for
-#   owner NandhaKishorM, repo laya, workflow release.yml, environment pypi
-# Then no API token ever lives in GitHub secrets.
+#   owner thread3d, repo laya-words-sounds-vision, workflow release.yml, environment pypi
+# Then no API token ever lives in GitHub secrets. This named the pre-move identity
+# (`NandhaKishorM/laya`) long after the repository moved, so the publish step would have failed the
+# exchange against a publisher that no longer exists -- with a message about OIDC, not about a stale
+# comment. If publishing ever fails here, check this line first.
+#
+# `scripts/check_release.py` is what decides whether the tag may publish at all (version, changelog
+# section, tag shape); this file assumes that has passed.
 
 on:
   push:
@@ -74,9 +80,9 @@ jobs:
         with:
           name: dist
           path: dist/
-      # Needs a Trusted Publisher on PyPI (Publishing -> add: owner NandhaKishorM,
-      # repo laya, workflow release.yml, environment pypi). Until that exists the
-      # exchange fails; skip-existing also makes a re-run safe after a manual upload.
+      # Needs a Trusted Publisher on PyPI: owner thread3d, repo laya-words-sounds-vision, workflow
+      # release.yml, environment pypi. Until that exists the exchange fails; `skip-existing` also
+      # makes a re-run safe after a manual upload.
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1 (v1.14.3)
         with:
           skip-existing: true

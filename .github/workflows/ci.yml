@@ -318,6 +318,20 @@ jobs:
           ruff check sdk/python/ --select=E9,F63,F7,F82,F401,F811 --line-length=120
           ruff check laya-java/scripts/ laya-dotnet/tools/ laya-ts/scripts/ \
             laya-go/scripts/ --select=E9,F63,F7,F82 --line-length=120
+      # The workflows are code: they decide what runs on this repository's behalf, and until now a
+      # malformed expression or a shellcheck finding in a `run:` block failed nothing. Pinned the way
+      # the self-hosted runner and the toolchains are -- a version and the checksum published with
+      # that release, which was also re-derived from the archive here.
+      - name: actionlint (the workflows are code too)
+        run: |
+          set -euo pipefail
+          version=1.7.7
+          want=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+          curl -sSfL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          echo "${want}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -oneline
       - name: Workflow triggers (a tag push must not re-run a lane)
         # The private-repo minutes this repository has are finite, and a bare `on: push:` spends
         # them twice per commit: a tag push is a push, so tagging a release re-ran five lanes
