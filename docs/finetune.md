@@ -294,6 +294,11 @@ what catches a fusion layer that learned to answer from the text and treat the p
 decoration. `flip` permutes the option list and requires the answer not to move. Both are
 described in [the evaluation harness](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording).
 
+The runnable path through everything above is in the examples: 48-53 for pictures (the state, the
+transport limits, the block layout, a decision, both gates, and routing) and 42-47 for sounds. The
+ones that need no weights run on a plain `pip install laya`; the rest open a checkpoint you trained
+and otherwise print the command that would make one.
+
 ## Sounds: teaching a checkpoint to listen
 
 A state may carry a recording, and `--audio` is what turns a checkpoint into one that can read it:

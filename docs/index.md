@@ -42,6 +42,7 @@ in [CHANGELOG.md](https://github.com/thread3d/laya-words-sounds-vision/blob/main
 | build for ARM64 hosts or DGX Spark | [ARM64 and DGX Spark containers](docker-platforms.md) |
 | specialise a checkpoint for your own decisions | [Browser-agent fine-tuning example](finetune_browser_agent.md) and the [fine-tuning notebook](https://github.com/thread3d/laya-words-sounds-vision/blob/main/notebooks/laya_finetune_typed_decisions_2xT4_kaggle.ipynb) |
 | answer questions about a picture, or teach a checkpoint to look at one | [Vision fine-tuning](finetune.md#vision-teaching-a-checkpoint-to-look-at-a-picture) and [the measured results](vision-benchmark-results.md) |
+| learn the media path end to end, from the state contract to the gates | [the examples' stages 9 and 10](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/README.md#stage-9--a-decision-about-a-sound-42-47) (42-47 sounds, 48-53 pictures) |
 | answer questions about a recording, or teach a checkpoint to listen to one | [Sounds](audio-decision-system.md) and [sound fine-tuning](finetune.md#sounds-teaching-a-checkpoint-to-listen) |
 | judge benchmark results and deployment limits | [Benchmarks and known limits](benchmarks.md) |
 | look up a class, function or parameter | [Python API reference](reference/index.md) |

@@ -6,6 +6,10 @@
 #
 # Each example is a separate process, so each one loads its own checkpoints; the full sweep takes
 # several minutes on CPU and a bit less on MPS. Output is captured and shown only for failures.
+#
+# 46, 47, 51 and 52 need a checkpoint trained with `--audio` / `--vision`, which no published bundle
+# carries. Without one they print the `laya-train` command that would make one and exit 0, so the
+# sweep stays green; set LAYA_AUDIO_MODEL / LAYA_VISION_MODEL to run them for real.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

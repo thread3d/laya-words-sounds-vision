@@ -1,11 +1,18 @@
 # Laya examples — a learning path
 
-41 runnable scripts arranged as eight stages. Each stage assumes the one before it and adds one
+53 runnable scripts arranged as ten stages. Each stage assumes the one before it and adds one
 idea, so you can stop wherever you already have what you need. Every script runs against the real
 checkpoints and prints real output — nothing here is a mock, and the numbers you see come from the
 model on your machine. `_common.py` prefers `../models` when a local copy is there and otherwise
 loads the same checkpoints from the Hub (`convaiinnovations/laya`) on first use, so these run after
 a plain `pip install laya`.
+
+The last two stages are about pictures and recordings. No *published* checkpoint reads either one —
+a media checkpoint is one somebody trained with `--vision` or `--audio` — so those examples split
+cleanly: the ones that need no weights run everywhere, and the ones that do open a checkpoint you
+have and otherwise print the `laya-train` command that would make one and exit 0. `LAYA_VISION_MODEL`
+and `LAYA_AUDIO_MODEL` name it; `_common.media_model` falls back to `models/laya-vision` and
+`models/laya-audio`.
 
 ```bash
 cd ..                                            # repository root
@@ -125,6 +132,42 @@ python examples/01_first_call_minimal.py         # any Python with torch + trans
 
 **You can now** run Laya as a component of a real system.
 
+## Stage 9 — a decision about a sound (42-47)
+
+No published checkpoint reads a recording; one is trained with `--audio` (`docs/finetune.md`). So this
+stage is split on purpose: 42-45 need **no checkpoint at all** — the state contract, the decoder, the
+transport limits and the block layout are pure Python — and 46-47 open a sound checkpoint you have,
+or print the `laya-train` command that would make one and exit 0.
+
+| | what you'll learn |
+|---|---|
+| `42_sound_in_the_state.py` | `audio_path` / `audio` / `audio_base64` / `audio_waveform`, what `laya.audio.split_state` keeps beside them, and why a recording with no text is a legal state. |
+| `43_decoding_and_sample_rate.py` | the four steps from container to samples: decode `[channels, frames]`, downmix, resample to the tower's rate, peak-normalise — and what a 44.1 kHz clip sounds like to a 16 kHz tower. |
+| `44_sound_transport_limits.py` | the two costs of a recording, both answered from the header: 12 MB and 120 s, `AudioRefused.reason`, and why a URL is refused by default. |
+| `45_sound_block_layout.py` | `audio_plan`: the splice point after the options, the token cost of `n_audio_tokens`, the `[AUD_SUMMARY]` row a large head earns, and the two position policies. |
+| `46_sound_decision.py` | a real decision about a recording: cold vs warm cost, one block shared by every question in the call, and how far rewording the text beside the clip moves the answer. |
+| `47_sound_necessity_gate.py` | gate 1 with `laya.evals_audio.audio_ablation`: answer the same rows with the recording removed and require the accuracy to fall. |
+
+**You can now** put a recording in a state, know what the engine refuses before it decodes, and tell
+a checkpoint that listens from one that has an expensive tower attached.
+
+## Stage 10 — a decision about a picture (48-53)
+
+The same split: 48-50 and 53 run with no media checkpoint; 51-52 need one (`--vision`) and skip with
+the command when there is none.
+
+| | what you'll learn |
+|---|---|
+| `48_image_in_the_state.py` | a PNG written with `zlib`, the three image keys, `laya.vision.split_state`, and the `[3, 224, 224]` tensor the encoder actually receives. |
+| `49_image_transport_limits.py` | the header answers both questions: a 40-byte decompression bomb refused before Pillow loads, the 12 MB / 16.8 MP caps, and the SSRF reason a URL is refused. |
+| `50_vision_block_layout.py` | `visual_plan` and the splice performed on a toy tensor: where the block lands, why *after* the option markers, and what the summary row is for. |
+| `51_vision_decision.py` | a real decision about a picture, the same state with the picture removed, and what a *text* checkpoint does with it — answers about the path string, silently. |
+| `52_vision_gates.py` | gate 2b (`option_order_flip_rate`) over the images in this repository, gate 1 on one row plus `laya-evals ablate`, and why `sequential` flips 28.3 % where `state_conditioned` flips 0.0 %. |
+| `53_routing_media.py` | one block per state, and `Router(vision_model=..., audio_model=...)` sending image, sound and text states to the checkpoint that can read them. |
+
+**You can now** serve pictures and recordings beside text, with the two gates that decide whether
+the checkpoint is actually looking or listening.
+
 ---
 
 ## Where to look things up
@@ -150,6 +193,19 @@ python examples/01_first_call_minimal.py         # any Python with torch + trans
 | compose checkpoints | 38 |
 | handle failures | 39 |
 | build a service | 41 |
+| put a recording in a state | 42 |
+| decode / resample / normalise audio | 43 |
+| limit what a recording may cost | 44 |
+| plan the sound block's size and place | 45 |
+| make a decision about a sound | 46 |
+| prove the sound is doing the work | 47 |
+| put a picture in a state | 48 |
+| limit what an image may cost | 49 |
+| plan the visual block's size and place | 50 |
+| make a decision about a picture | 51 |
+| prove the picture is doing the work | 52 |
+| route media to the right checkpoint | 53 |
+
 
 `run_all.sh` exits non-zero if any example fails, so it doubles as a smoke test over the whole API
 surface. It needs the checkpoints, so it is not part of CI; `python -m compileall examples/` is.

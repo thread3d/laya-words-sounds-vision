@@ -27,7 +27,7 @@ two code changes that were needed, how to re-run everything, and the numbers tha
 | `verify/edge_sweep.py` | inference paths the other suites miss: 12 questions in one pass, 20/77/120-option choice, odd input shapes, truncation, router lifecycle, CPU-vs-MPS agreement |
 | `verify/checkpoints.py` + `verify/checkpoints.json` | checks the weights against recorded sha256 hashes (a truncated download is otherwise silently wrong) |
 | `verify/soak_check.py` | 200 repeated calls for drift and RSS growth, reload/eviction cycles, concurrent calls from several threads. Uses `psutil` if installed and falls back to peak RSS otherwise |
-| `examples/` | 41 worked examples as an eight-stage learning path, plus `run_all.sh` and the path doc |
+| `examples/` | 53 worked examples as a ten-stage learning path, plus `run_all.sh` and the path doc |
 | `laya/finetune.py` | the RLCD training loop, device-agnostic: CUDA/ROCm (fp16, DDP), MPS and CPU (fp32) |
 
 `laya` is installed editable, so `import laya` from anywhere uses this checkout and picks up edits.
@@ -116,7 +116,7 @@ Results on this machine:
 | `verify/soak_check.py` | 200/200 calls byte-identical with flat RSS; 6 reload cycles leave exactly 1 live agent and 1 live model (0 after `unload()`); 4-thread concurrency matches the single-threaded answer |
 | `tests/test_training.py` | 59 passed — proper-scoring-rule reward, TD(λ) targets, ECE, entropy confidence, collation, sequence building |
 | `tests/test_finetune.py` | 26 passed — device selection, temperature fitting, and a real training run on a miniature checkpoint (CI-safe: no weights, no GPU) |
-| `examples/run_all.sh` | **41 passed, 0 failed** (eight stages, 23-49 s each; the whole sweep is ~20 min) |
+| `examples/run_all.sh` | **41 passed, 0 failed** when this record was written (eight stages then, 23-49 s each; the whole sweep is ~20 min). Stages 9 and 10 came later -- 42-53 -- and the four pages that need a trained media checkpoint print a skip and pass when there is none |
 | CI lint (`ruff`) + `compileall` | pass |
 
 CPU and MPS produce identical answers (same presets, same confidences), so the GPU path is not a

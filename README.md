@@ -330,7 +330,7 @@ Three checkpoints, and a `Router` that picks between them per request:
 | document | what is in it |
 |---|---|
 | Quickstart below | the shortest path to a working call |
-| [`examples/README.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/README.md) | 41 runnable examples as an eight-stage learning path: first call → schema design → production service |
+| [`examples/README.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/README.md) | 53 runnable examples as a ten-stage learning path: first call → schema design → production service → a decision about a sound or a picture |
 | [`LOCAL_SETUP.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/LOCAL_SETUP.md) | running this checkout on macOS/Intel: pinned stack, checkpoint manifest, the two portability fixes, every verification run and its result |
 | [`BENCHMARKS.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/BENCHMARKS.md) | every benchmark run consolidated, all 51 languages, with the limits stated plainly |
 | [`research/README.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/research/README.md) | the harnesses that produce those numbers, and how to re-run them |
@@ -532,7 +532,7 @@ script itself is not Intel-specific. Commands are relative to the repository roo
 .venv/bin/python verify/checkpoints.py             # weights vs the recorded sha256 hashes
 .venv/bin/python verify/soak_check.py              # drift, RSS and concurrency over 200 calls
 .venv/bin/python tests/test_local_e2e.py ./models             # the repo's own e2e suite
-./examples/run_all.sh                              # all 41 examples, pass/fail
+./examples/run_all.sh                              # all 53 examples, pass/fail
 ```
 
 Measured here, one `predict()` call answering 4 questions about a short email (median of 10,
@@ -567,9 +567,12 @@ run — are in [`LOCAL_SETUP.md`](https://github.com/thread3d/laya-words-sounds-
 
 ## Worked examples
 
-`examples/` is a 41-script learning path: eight stages, each adding one idea, from a single call to
-a production triage service. Every one runs against the real checkpoints and prints real output,
-not placeholders:
+`examples/` is a 53-script learning path: ten stages, each adding one idea, from a single call to
+a production triage service that can also read a picture or a recording. Every one runs against the
+real checkpoints and prints real output, not placeholders. Stages 9 and 10 split cleanly: what needs
+no weights (state shapes, decoders, transport limits, the block layout, routing) always runs, and
+the end-to-end media pages open a checkpoint you trained with `--vision` or `--audio`, or print the
+`laya-train` command and exit 0:
 
 ```bash
 .venv/bin/python examples/01_first_call_minimal.py
@@ -586,6 +589,8 @@ not placeholders:
 | 6. `25`-`29` | the built-in presets |
 | 7. `30`-`34` | design your own schema, then tune it |
 | 8. `35`-`41` | devices, scale and production shape |
+| 9. `42`-`47` | a decision about a sound: the state, the decoder, the limits, the block, the gate |
+| 10. `48`-`53` | a decision about a picture: the state, the limits, the block, the two gates, routing |
 
 [`examples/README.md`](https://github.com/thread3d/laya-words-sounds-vision/blob/main/examples/README.md) is the full learning path, with a concept index
 ("I want to… → go to…").
