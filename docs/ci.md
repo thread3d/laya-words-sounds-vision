@@ -65,28 +65,35 @@ costs nothing on a normal day.
 A port lane's cells compare against goldens recorded from the Python package at the commit under
 test. Recording is the expensive half — a checkpoint fetch plus a generator run — and its result
 depends only on the commit and the pinned revision, so a matrix of N cells used to produce N
-byte-identical copies of one answer, each paying for its own torch install and its own 1.7 GB
+byte-identical copies of one answer, each paying for its own torch install and its own multi-gigabyte
 checkpoint fetch.
 
-`cpp.yml` now has a `goldens` job that records once and publishes two artifacts for the run:
+Two lanes now have a `goldens` job that records once and publishes artifacts for the run:
 
-| artifact | contents | retention |
+| lane | the recorder | what the cells take |
 |---|---|---|
-| `cpp-goldens` | the nine recorded families (`.cpp-goldens/*.json`) | 1 day |
-| `cpp-checkpoint-parts` | `<checkpoint>/tokenizer/` and `rl_agent_config.json` for english and multilingual — the only files a cell opens, not the weights | 1 day |
+| `cpp.yml` | `cpp-goldens` (the nine families) and `cpp-checkpoint-parts` (`<checkpoint>/tokenizer/` and `rl_agent_config.json` for english and multilingual — the only files a cell opens, not the weights) | both, and install nothing: no torch, no hub, no generator |
+| `dotnet.yml` | `dotnet-goldens` (routing, round4, and the three checkpoints, recorded by one `regen_golden.py --checkpoint all`) | the artifact; the ONNX exports they still need come from the cache the recorder warms |
 
-The five `build` cells download both and run no Python generator at all, so they no longer install
-torch or reach the hub. They assert the shape of what arrived (`The recorded inputs arrived`), which
-turns a wrong artifact depth into an immediate failure instead of a missing-checkpoint skip after a
-full compile. The three `onnx` cells take the same recorded eight and record only the two
-graph-backed families themselves, because those are recorded from the graph *that cell* exports.
+The five `build` cells of `cpp.yml` and the model-free `build` job of `dotnet.yml` run no Python
+generator at all, so they no longer install torch or reach the hub. They assert the shape of what
+arrived (`The recorded inputs arrived`), which turns a wrong artifact depth into an immediate
+failure instead of a missing-checkpoint skip after a full compile — and in `dotnet.yml` a skip is
+not a failure to `dotnet test`, which is exactly the hole the arrival check closes.
+
+Two cells keep a generator, and only under a condition: the ones that record a *graph-backed*
+family. `cpp.yml`'s `onnx` cells record `predict.json` from the graph they exported in that cell, so
+the recording cannot be shared; the rule is that every generator call they make stays `--only`-scoped
+to those families.
 
 Retention is one day on purpose: an artifact here is an input to this run's cells, not an archive,
 and artifact storage is billed the way minutes are.
 
-The other lanes still record per cell — `java.yml`'s cells each need their own exported graph, and
-`dotnet.yml` and `rust.yml` record through their own `regen_golden.py`. Same pattern applies, one
-lane at a time.
+`tests/test_ci_record_once.py` is the guard: a consumer that downloads an artifact without
+`needs: goldens`, a cell that starts recording the shared set again, a cache entry the recorder warms
+under a key no cell restores, or a lane that half-migrates (consumers rewired, recorder missing)
+fails it. `java.yml`, `rust.yml` and `go.yml` still record per cell, and it reports that as a skip
+rather than passing silently.
 
 ## What one commit costs
 

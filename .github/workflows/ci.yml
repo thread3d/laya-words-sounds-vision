@@ -121,6 +121,9 @@ jobs:
           pip install -e ".[mcp,serve,langchain]" httpx
           # The pytest-style suites need the runner; nothing else in this job uses it.
           pip install pytest
+          # `tests/test_ci_record_once.py` reads the workflow YAML. PyYAML arrives transitively with
+          # huggingface_hub today, and a transitive dependency is not a guarantee, so name it.
+          pip install pyyaml
 
       - name: Import check
         run: python -c "import laya; print(laya.__version__); print(sorted(laya.__all__))"

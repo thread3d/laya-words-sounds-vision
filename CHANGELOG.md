@@ -6,6 +6,26 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.4] - 2026-11-06
+
+**No package code changes.** The .NET lane records its goldens once, and the pattern gets a guard.
+
+`dotnet.yml` had eight job instances — the model-free `build` plus seven parity cells — each
+installing torch, fetching checkpoints from the hub and running `regen_golden.py`. Four recordings
+were being made seven times, because `regen_golden.py` records both layouts in one run and the cells
+that differ only in `layouts` were recording byte-identical goldens from the same checkpoint. One
+`goldens` job now records them all (`--checkpoint all`) and publishes `dotnet-goldens`; the cells
+declare `needs: goldens`, take the artifact, and install only the pinned requirements the skip-guard
+script needs — no torch, no hub, no generator. The ONNX exports they still need come from the cache
+the recorder warms, keyed exactly as the cells key it so the entry is actually restored.
+
+New `tests/test_ci_record_once.py` is the guard for the whole pattern. It lives in the shared suite
+list, so CI and the release gate both run it, and it fails on: a consumer that downloads an artifact
+without `needs: goldens`; a cell that starts recording the shared set again; a cache entry the
+recorder warms under a key no cell restores; and a lane that half-migrates — consumers rewired, the
+recorder never landed. `java.yml`, `rust.yml` and `go.yml` still record per cell and are reported as
+skips rather than passing silently.
+
 ## [4.0.3] - 2026-11-06
 
 **No package code changes.** The C++ lane now records its goldens once instead of eight times.
