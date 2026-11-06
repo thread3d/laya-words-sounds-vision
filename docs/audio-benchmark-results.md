@@ -389,3 +389,39 @@ are verified against the unbatched path on real ESC-50 rows, not only on synthet
 
 Same answers, same arithmetic, both passes batched identically. The latency gain is modest there
 because a `state_conditioned` decision is ten rows, so the batch is spent on one question.
+
+## 5. A comparator measured here: CLAP zero-shot
+
+The published table says CLAP scores 82.6 % zero-shot on ESC-50. Reproducing it locally costs no
+training — the model embeds each clip and 50 text prompts, and the answer is the most similar prompt —
+so the comparison is ours rather than borrowed:
+
+```bash
+python3 research/benchmarks/audio_esc50/zeroshot_clap.py --device cpu
+```
+
+| arm | accuracy on all 2 000 ESC-50 clips |
+|---|---|
+| CLAP (`laion/clap-htsat-unfused`), zero-shot, 1 prompt template | **0.8925** |
+| the same, 4 prompt templates averaged | **0.8955** |
+| published CLAP zero-shot (leaderboard) | 82.6 % |
+| **Laya, 50-way, 1 440 training rows, 20 epochs** | **0.1200** |
+
+Two readings, and the second is the uncomfortable one:
+
+* **Text-audio pre-training is worth an enormous amount on a 50-way environmental task.** CLAP was
+  trained on 128 K text-audio pairs and needs no ESC-50 examples at all; the engine's tower saw
+  speech, not "sound in general", and 1 440 labelled rows cannot make up the difference. This is the
+  same lesson as §2, at a larger scale.
+* **The gap is the representation, not the head or the layout** — the FSDD arms in §4 reach 0.97 with a
+  tower whose pre-training matches the task. A decision head cannot read what the features do not
+  contain, and no amount of epochs fixes a tower that was never shown the kind of sound being decided.
+
+The prompt templates are `This is the sound of {}.`, `This is a sound of {}.`, `a photo of {}` and
+`sound of {}`; averaging one or four of them moves the number by 0.3 points, so the result is not an
+artefact of prompt engineering.
+
+CLAP's audio tower is convolutional and, like the audio tower, segfaults through MIOpen on this
+build — even with the harness's conv patch applied, which is why this comparator ran on the CPU
+(2.9 minutes for 2 000 clips). `gpu_patch.patch_model` is still worth having: it patches `Conv2d` as
+well as `Conv1d`, and it is what let the patch be tested against CLAP's own layers.

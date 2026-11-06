@@ -28,6 +28,8 @@ recording?) and `flip` (does reordering the options change it?).
 | `train.sh` | one engine arm through `laya-train`: `--arm esc50-seq\|esc50-sc\|esc10-sc\|esc10-seq --fold N --epochs E` |
 | `run_engine_arms.sh` | both engine arms back to back, each followed by its gates |
 | `eval_gate.py` | accuracy, gate 1, gate 2b and per-decision latency for one checkpoint |
+| `zeroshot_clap.py` | the CLAP zero-shot comparator, measured locally: 0.8955 on all 2 000 clips |
+| `gpu_patch.py`, `train_gpu.py`, `gpuenv.sh`, `run_gpu_arms.sh` | the cards: the MIOpen conv workaround, a `laya-train` entry point that installs it, the environment, and both arms one per GPU |
 
 Data and checkpoints live in `$AUDIO_BENCH_DATA` (default `<repo>/.audio-bench`, gitignored):
 616 MB of ESC-50, ~760 MB of cached frames, and the trained checkpoints.

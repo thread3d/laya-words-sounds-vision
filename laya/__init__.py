@@ -35,7 +35,7 @@ from .presets import (
 from .router import DEFAULT_MODELS, RouteDecision, Router
 from .structured import DecisionResult, decide, decide_batch
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 
 # Routing, language detection and email cleaning are pure Python. The torch-backed names are
 # resolved lazily so that `import laya` -- and therefore `from laya import Router` or

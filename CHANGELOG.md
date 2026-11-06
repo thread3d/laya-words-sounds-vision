@@ -6,6 +6,32 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [3.1.2] - 2026-11-05
+
+A published comparator, measured here: CLAP zero-shot on ESC-50.
+
+### Added
+
+- `research/benchmarks/audio_esc50/zeroshot_clap.py`: `laion/clap-htsat-unfused` against 50 text
+  prompts, no training on ESC-50 — the cheapest strong comparator in the published table, made local
+  instead of borrowed. Measured **0.8925** with one prompt template and **0.8955** with four, on all
+  2 000 clips (published: 82.6 %, leaderboard).
+- `gpu_patch.patch_model`: the MIOpen conv workaround extended to `Conv2d` (and to any model, not
+  just the audio tower), with the same self-verification against `conv` on the model's own weights.
+
+### Fixed
+
+- The zero-shot script compared a predicted *index* with a class *name* and reported 0.0000 — a number
+  so obviously wrong that it read as "the model learned nothing" rather than as a bug. The truth is
+  now an index on both sides, and the comment says why.
+
+### Measured
+
+CLAP zero-shot 0.8925-0.8955 against the Laya engine's 0.1200 on the same 50 classes: the gap is the
+representation. CLAP was pre-trained on 128 K text-audio pairs; the engine's tower on speech. On
+FSDD, where the tower's pre-training matches the task, the same engine reaches 0.9740. A decision head
+cannot read what the features do not contain.
+
 ## [3.1.1] - 2026-11-05
 
 The arms the CPU could not afford, measured on the cards — and the best number this project has.

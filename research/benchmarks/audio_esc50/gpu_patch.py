@@ -39,10 +39,8 @@ def _conv1d_gemm(self, x):
     """`Conv1d` as unfold + one batched matmul, groups included.
 
     wav2vec2's front-end mixes both cases: `Conv1d(1, 512, kernel=10, stride=5)` with `groups=1` and
-    later `Conv1d(512, 512, ...)` layers, so a groups-1-only workaround fails on the model it was
-    written for. A grouped conv is `g` independent convs, which `bmm` expresses by folding the group
-    axis into the batch axis -- `torch.matmul` will not do it, because a 4-D `[g, B, L, F]` against a
-    3-D `[g, F, C]` broadcast-aligns `g` with `B` and fails.
+    later depthwise layers, so a groups-1-only workaround fails on the model it was written for.
+    The grouped matmul lives in :func:`_grouped_matmul`, which both conv paths share.
 
     Verified against `F.conv1d` on every layer of the real tower by :func:`patch_tower`.
     """
@@ -59,16 +57,92 @@ def _conv1d_gemm(self, x):
     out_len = (length - kernel) // stride + 1
     cols = x.unfold(2, kernel, stride)                        # [B, C_in, L_out, K]
     cols = cols.permute(0, 2, 1, 3).contiguous()
-    cols = cols.view(batch, out_len, groups, in_channels // groups * kernel)
-    cols = cols.permute(2, 0, 1, 3).reshape(groups * batch, out_len, -1)
-    weight = self.weight.view(groups, out_channels // groups, -1).permute(0, 2, 1)
-    weight = weight.unsqueeze(1).expand(groups, batch, weight.shape[-2], weight.shape[-1])
-    out = torch.bmm(cols, weight.reshape(groups * batch, weight.shape[-2], weight.shape[-1]))
-    out = out.view(groups, batch, out_len, out_channels // groups)
-    out = out.permute(1, 2, 0, 3).reshape(batch, out_len, out_channels)
+    cols = cols.view(batch, out_len, groups, in_channels // groups * kernel).permute(2, 0, 1, 3)
+    out = _grouped_matmul(cols, self.weight, groups, batch, out_len)
     if self.bias is not None:
         out = out + self.bias
     return out.transpose(1, 2).contiguous()
+
+
+def _grouped_matmul(cols, weight, groups, batch, out_len):
+    """`[B, L, g, C_in/g*K]`-style columns against a grouped weight, as one `bmm`.
+
+    `torch.matmul` will not do this: a 4-D `[g, B, L, F]` against a 3-D `[g, F, C]` broadcast-aligns
+    `g` with `B` and fails, so the group axis is folded into the batch axis by hand.
+    """
+    out_channels, per_group = weight.shape[0], weight.shape[0] // groups
+    cols = cols.reshape(groups * batch, out_len, -1)          # `cols` arrives as [g, B, L, F]
+    weight = weight.view(groups, per_group, -1).permute(0, 2, 1)
+    weight = weight.unsqueeze(1).expand(groups, batch, weight.shape[-2], weight.shape[-1])
+    out = torch.bmm(cols, weight.reshape(groups * batch, weight.shape[-2], weight.shape[-1]))
+    return out.view(groups, batch, out_len, per_group).permute(1, 2, 0, 3).reshape(
+        batch, out_len, out_channels)
+
+
+def _conv2d_gemm(self, x):
+    """`Conv2d` as `F.unfold` + grouped matmul, for models that are not a wav2vec tower.
+
+    CLAP's HTSAT encoder is the second model in this harness that dies on MIOpen, and its convs are
+    2-D -- the same defect the vision harness patches for SigLIP, with a kernel that does not always
+    equal its stride, so the general unfold form is used here rather than the patch-embed identity.
+    """
+    if _ints(self.dilation, 2)[0] != 1 or _ints(self.dilation, 2)[1] != 1:
+        raise NotImplementedError("gpu_patch: dilated Conv2d is not supported")
+    kh, kw = _ints(self.kernel_size, 2)
+    sh, sw = _ints(self.stride, 2)
+    ph, pw = _ints(self.padding, 2)
+    if ph or pw:
+        x = F.pad(x, (pw, pw, ph, ph))
+    batch, in_channels, height, width = x.shape
+    out_h = (height - kh) // sh + 1
+    out_w = (width - kw) // sw + 1
+    cols = F.unfold(x, kernel_size=(kh, kw), stride=(sh, sw))      # [B, C_in*kh*kw, L]
+    cols = cols.transpose(1, 2).contiguous()                        # [B, L, C_in*kh*kw]
+    cols = cols.view(batch, out_h * out_w, self.groups,
+                     in_channels // self.groups * kh * kw).permute(2, 0, 1, 3)
+    out = _grouped_matmul(cols, self.weight, self.groups, batch, out_h * out_w)
+    out = out.view(batch, out_h, out_w, -1).permute(0, 3, 1, 2).contiguous()
+    if self.bias is not None:
+        out = out + self.bias.view(1, -1, 1, 1)
+    return out
+
+
+def patch_model(model, verify: bool = True):
+    """Patch every `Conv1d`/`Conv2d` in any model (a zero-shot comparator, say).
+
+    Returns ``(conv1d, conv2d)`` counts. `verify` runs each conv on CPU with its own weights and
+    refuses to install a layer whose GEMM form disagrees.
+    """
+    counts = [0, 0]
+    for module in model.modules():
+        if isinstance(module, torch.nn.Conv1d):
+            forward = _conv1d_gemm
+            probe_shape = (2, module.in_channels, 400)
+            reference_args = dict(stride=module.stride, padding=module.padding)
+            index = 0
+        elif isinstance(module, torch.nn.Conv2d):
+            forward = _conv2d_gemm
+            probe_shape = (2, module.in_channels, 64, 64)
+            reference_args = dict(stride=module.stride, padding=module.padding)
+            index = 1
+        else:
+            continue
+        if verify:
+            probe = torch.randn(*probe_shape, dtype=module.weight.dtype)
+            reference = F.conv1d(probe, module.weight, module.bias, groups=module.groups,
+                                 dilation=module.dilation, **reference_args) \
+                if index == 0 else F.conv2d(probe, module.weight, module.bias,
+                                            groups=module.groups, dilation=module.dilation,
+                                            **reference_args)
+            patched = forward(module, probe)
+            if patched.shape != reference.shape:
+                raise AssertionError("gpu_patch: shape %s != conv %s"
+                                     % (tuple(patched.shape), tuple(reference.shape)))
+            if (patched - reference).abs().max().item() > 1e-4:
+                raise AssertionError("gpu_patch: GEMM conv differs from conv by more than 1e-4")
+        module.forward = types.MethodType(forward, module)
+        counts[index] += 1
+    return tuple(counts)
 
 
 def patch_tower(tower, verify: bool = True):

@@ -98,6 +98,7 @@ name the answer — and measures four arms on the identical rows:
 | `centroid` | nearest class mean of the frozen embedding | a head with no learning at all |
 | `ridge` | linear probe on the frozen embedding, penalty chosen by inner CV on the training fold only | the standard "trained head on a frozen tower" number, and the one the published probing rows report |
 | **Laya** | the engine: frozen tower → projector → block spliced after the option head, trained with `laya-train --audio` | the thing being measured |
+| **CLAP zero-shot** | `laion/clap-htsat-unfused`, text prompts against audio embeddings, no training on ESC-50 | a published system measured here, so the comparison is local rather than borrowed — 0.8955 on all 2 000 clips |
 
 Then the two gates from [the evaluation harness](evals.md#media-gates-does-it-actually-look-at-the-picture-or-listen-to-the-recording):
 `ablate --modality audio` (does the answer depend on the recording?) and `flip` (does reordering the
