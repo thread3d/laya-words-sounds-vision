@@ -77,6 +77,34 @@ The [README's Honest limits section](https://github.com/thread3d/laya-words-soun
 has examples and current workarounds. The benchmark tables give the dataset and hardware
 behind each of the limits above.
 
+## The scheduled runs
+
+Two things here are measured on a schedule, so a figure can be pointed at rather than restated.
+
+| lane | what it runs | artifact |
+|---|---|---|
+| [`Evals`](https://github.com/thread3d/laya-words-sounds-vision/actions/workflows/evals.yml) (Mondays 03:00 UTC, and on a release) | the English checkpoint on MASSIVE English, compared to the committed baseline in `research/results/` | `eval-report` |
+| [`Bench`](https://github.com/thread3d/laya-words-sounds-vision/actions/workflows/bench.yml) (Mondays 07:00 UTC, and on demand) | `benchmarks/bench_predict_batch.py` — batch throughput, and batch-versus-single agreement | `bench-report` |
+
+`bench-report` holds `bench-batch.json` and `bench-consistency.json` (plus `bench-router.json` when the
+router mode was asked for), and `bench-context.json` — the laya, Python and torch versions, whether CUDA
+was available and on what, the runner name, the commit and the run id. The three together are what let
+a 30-day-old artifact explain itself; the run's step summary shows the same numbers without a
+download.
+
+**The consistency measurement is a gate, not a number.** `bench_predict_batch.py --consistency` runs
+the same requests one by one and as a single `predict_batch` call, and compares them answer by answer:
+one flipped answer fails the job. That is a correctness property of batching, so it belongs on a
+schedule; the throughput figures beside it are hardware-dependent and fail nothing.
+
+Throughput therefore means "on the runner that produced this run". A hosted run is CPU numbers; point
+`vars.LAYA_RUNNER` at a machine you own and the same lane measures that machine's GPUs instead — see
+[the self-hosted runner](self-hosted-runner.md). Artifacts are kept 30 days, so cite the workflow page
+in durable prose and a particular run only while it lives.
+
+Neither lane replaces the tables in `BENCHMARKS.md`. Those are the measured record across hardware and
+datasets; a weekly run on one machine is a drift check against them, not a substitute.
+
 ## Reproduce or extend a result
 
 Start with the [script and result map](https://github.com/thread3d/laya-words-sounds-vision/blob/main/research/README.md)

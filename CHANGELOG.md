@@ -6,6 +6,31 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.9] - 2026-11-06
+
+**No package code changes.** Item 6: the performance harness runs on a schedule, and its output is an
+artifact a document can point at.
+
+`benchmarks/bench_predict_batch.py` already measured two things and wrote `--json`; nothing ran it.
+The new [`Bench` workflow](https://github.com/thread3d/laya-words-sounds-vision/actions/workflows/bench.yml)
+runs it Mondays at 07:00 UTC and on demand, publishing `bench-report` (30 days) with
+`bench-batch.json`, `bench-consistency.json` and — when the dispatch input asks for it —
+`bench-router.json`, beside `bench-context.json`: the laya, Python and torch versions, whether CUDA was
+available and on what, the runner, the commit and the run id. The harness reports its table and nothing
+about the machine, so the workflow records that separately rather than letting an artifact be a table
+with no provenance. The run's step summary shows the same numbers without a download.
+
+The consistency half is the part that matters as a gate rather than a measurement: the same requests
+run one by one and as one `predict_batch` call, compared answer by answer, and a single flipped answer
+fails the job. Throughput numbers are hardware-dependent and fail nothing, which is why the lane says
+so — a hosted run is CPU numbers, and pointing `vars.LAYA_RUNNER` at a machine you own (4.0.7) makes
+the same lane measure its GPUs.
+
+`docs/benchmarks.md` gained "The scheduled runs": both lanes, both artifacts, what each one does and
+does not replace, and the note that artifacts live 30 days so durable prose should cite the workflow
+page rather than a run.
+
+
 ## [4.0.8] - 2026-11-06
 
 **No package code changes.** Item 4: a release has to be a release, and nothing else has to look like

@@ -1,0 +1,146 @@
+name: Bench
+
+# The performance numbers in BENCHMARKS.md were measured on specific machines and pasted in. This
+# lane is where they can be reproduced on a schedule, with the run's JSON kept as an artifact so a
+# document can point at evidence instead of restating a figure.
+#
+# What it measures, from `benchmarks/bench_predict_batch.py`:
+#   * batch throughput -- one-by-one scoring against a single `predict_batch` call;
+#   * batch/single consistency -- the same requests both ways, compared answer by answer. This is a
+#     gate: a single decision flip fails the run. That is a correctness property, not a speed number,
+#     which is why it belongs on a schedule rather than in a document.
+# The numbers themselves are hardware-dependent, so nothing here fails on them; the artifact is the
+# record.
+#
+# The router mode needs all three checkpoints, so it is a dispatch input rather than part of the
+# weekly run.
+on:
+  schedule:
+    - cron: "0 7 * * 1"       # Monday 07:00 UTC, after the port lanes and the security scan
+  workflow_dispatch:
+    inputs:
+      router:
+        description: "Also benchmark Router.predict_batch on a mixed EN/Hindi workload (downloads all three checkpoints)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A benchmark is never obsolete, and it spends its first minutes downloading weights: cancelling one
+# to start another wastes the download and leaves no artifact. Same group, no cancellation -- the
+# same rule the evals lane follows and for the same reason.
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    name: batch throughput and consistency
+    # On a runner you point here the checkpoints are already staged and the GPUs are real; on a hosted
+    # runner this is CPU numbers. Either way the artifact says which it was (docs/self-hosted-runner.md).
+    runs-on: ${{ fromJSON(vars.LAYA_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e .
+
+      # What the numbers were measured on. The harness reports its own table and nothing about the
+      # machine, so this file is what makes a 30-day-old artifact explain itself.
+      - name: Record what this measured
+        run: |
+          python - <<'PY' > bench-context.json
+          import json, os, platform
+          import torch
+
+          import laya
+
+          info = {
+              "laya": laya.__version__,
+              "python": platform.python_version(),
+              "torch": torch.__version__,
+              "cuda_available": torch.cuda.is_available(),
+              "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+              "gpu_count": torch.cuda.device_count(),
+              "platform": platform.platform(),
+              "cpu_count": os.cpu_count(),
+              "runner": os.environ.get("RUNNER_NAME"),
+              "commit": os.environ.get("GITHUB_SHA"),
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "self_hosted": os.environ.get("LAYA_RUNNER", "") != "",
+          }
+          print(json.dumps(info, indent=2))
+          PY
+          cat bench-context.json
+
+      # `--json` writes the table it printed. The states are small and the repeat count low on
+      # purpose: this runs weekly on a shared runner, and the shape of the curve is what a reader
+      # needs, not a fifth repeat.
+      - name: Batch throughput
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python benchmarks/bench_predict_batch.py \
+            --states 1,2,4,8,16 --questions 4 --repeats 3 \
+            --checkpoints english --json bench-batch.json | tee bench-batch.txt
+
+      # The gate. `--consistency` exits non-zero when any answer flips between the batched and the
+      # single-request path, which is a real defect rather than platform noise.
+      - name: Batch and single-request answers agree
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python benchmarks/bench_predict_batch.py \
+            --consistency --samples 50 --checkpoints english \
+            --json bench-consistency.json | tee bench-consistency.txt
+
+      - name: Router throughput and consistency (dispatch only)
+        if: ${{ inputs.router }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python benchmarks/bench_predict_batch.py \
+            --router --samples 200 --states 1,4,8 --repeats 3 --json bench-router.json | tee bench-router.txt
+
+      # What the run measured, visible without downloading anything.
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Bench"
+            echo
+            echo "- runner: \`${{ runner.name }}\` (${{ runner.os }}); \`vars.LAYA_RUNNER\` was ${{ vars.LAYA_RUNNER != '' && 'set' || 'unset (hosted)' }}"
+            for f in bench-context.json bench-batch.txt bench-consistency.txt bench-router.txt; do
+              if [ -s "$f" ]; then
+                echo
+                echo "<details><summary>$f</summary>"
+                echo
+                echo '```'
+                head -60 "$f"
+                echo '```'
+                echo
+                echo "</details>"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-report
+          path: |
+            bench-*.json
+            bench-*.txt
+          if-no-files-found: warn
+          # Long enough for a document or a changelog entry to link the run it cites.
+          retention-days: 30
