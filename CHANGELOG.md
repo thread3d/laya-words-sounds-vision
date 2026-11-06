@@ -6,6 +6,23 @@ All notable changes to Laya (the Python package) are documented here. The format
 under `sdk/`, `laya-ts/`, `laya-go/`, `laya-java/`, `laya-rust/`, `laya-cpp/` and `laya-dotnet/`
 are versioned and released separately.
 
+## [4.0.15] - 2026-11-06
+
+**No package code changes.** Dependabot stops proposing a numpy major update it should not propose.
+
+The `onnx` extra's `numpy<2` cap is marker-scoped to macOS/Intel, where torch tops out at 2.2.2 — below
+2.3, the first release built against NumPy 2 — so widening it breaks `predict()`'s final `.numpy()`
+there. Dependabot read the cap as stale and proposed `<2` → `<3` (PR #2, declined in 4.0.14). The pip
+ecosystem's `ignore` list now suppresses numpy major updates, with both keys because they match
+different things: `update-types: version-update:semver-major` classifies the pull request, and
+`versions: [">=2"]` matches the version the change would admit. Patch and minor numpy updates still
+come through — the cap is about one major version, not about numpy.
+
+The edited file validates against the published `dependabot-2.0.json` schema, which is the only
+verification available for it: GitHub offers no endpoint that validates a Dependabot config, so the
+next scheduled run is the first real confirmation.
+
+
 ## [4.0.14] - 2026-11-06
 
 Two Dependabot branches resolved: one applied, one declined with the reason written down.

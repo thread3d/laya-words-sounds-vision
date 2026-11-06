@@ -6,6 +6,19 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     labels: [dependencies]
+    # `numpy<2` in the `onnx` extra is deliberate (pyproject.toml explains it at the requirement):
+    # the marker names macOS/Intel, where torch tops out at 2.2.2 -- below 2.3, the first release
+    # built against NumPy 2 -- so a major numpy update there raises "Numpy is not available" on the
+    # tensor conversion `predict()` ends with. Dependabot read the cap as stale and proposed
+    # `<2` -> `<3` (PR #2, declined); this stops it proposing that again.
+    #
+    # Both keys, because they match different things: `update-types` classifies the PR as a major
+    # update, and `versions` matches the version the change would admit. Patch and minor numpy
+    # updates still come through -- the cap is about one major version, not about numpy updates.
+    ignore:
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
+        versions: [">=2"]
 
   - package-ecosystem: npm
     directory: "/laya-ts"
